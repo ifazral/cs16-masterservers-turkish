@@ -7,7 +7,6 @@
 #include <string.h>
 #include "a2s_query.h"
 
-// Standart A2S_INFO Istek Paketi
 static const uint8_t A2S_INFO_REQUEST[] = {
     0xFF, 0xFF, 0xFF, 0xFF,
     0x54,
@@ -31,16 +30,15 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 {
     if (len < 6) return false;
 
-    // FF FF FF FF başlık kontrolü
     if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
         return false;
 
-    // Cevap tipi 'I' (0x49) olmalıdır
     if (data[4] != 0x49) return false;
 
-    int pos = 5; // Header (4) + Header Type (1) = 5. indeks Protocol baytıdır
+    int pos = 5;
 
-    out->protocol = data[pos++];
+    // Protocol baytını atla (Struct içerisinde tanımlı olmadığı için atama yapılmıyor)
+    uint8_t protocol = data[pos++];
 
     read_string(data, len, &pos, out->name, sizeof(out->name));
     read_string(data, len, &pos, out->map, sizeof(out->map));
@@ -63,24 +61,24 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 
     read_string(data, len, &pos, out->version, sizeof(out->version));
 
-    // Opsiyonel EDF (Extra Data Flags) kontrolü
+    // EDF (Extra Data Flags) kontrolü
     if (pos < len)
     {
         uint8_t edf = data[pos++];
-        if ((edf & 0x80) && pos + 2 <= len) pos += 2; // Port
-        if ((edf & 0x10) && pos + 8 <= len) pos += 8; // SteamID
-        if (edf & 0x40)                               // Spectator Info
+        if ((edf & 0x80) && pos + 2 <= len) pos += 2;
+        if ((edf & 0x10) && pos + 8 <= len) pos += 8;
+        if (edf & 0x40)
         {
             if (pos + 2 <= len) pos += 2;
             char spec_name[128];
             read_string(data, len, &pos, spec_name, sizeof(spec_name));
         }
-        if (edf & 0x20)                               // Keywords
+        if (edf & 0x20)
         {
             char keywords[256];
             read_string(data, len, &pos, keywords, sizeof(keywords));
         }
-        if ((edf & 0x01) && pos + 8 <= len) pos += 8; // GameID
+        if ((edf & 0x01) && pos + 8 <= len) pos += 8;
     }
 
     out->valid = true;
@@ -106,7 +104,6 @@ bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out
 
     DWORD start = GetTickCount();
 
-    // Challenge yanıtlarını ele almak için maksimum 2 deneme (Normal İstek -> Challenge -> Cevap)
     for (int attempt = 0; attempt < 2; attempt++)
     {
         if (sendto(sock, (const char *)req_buf, (int)req_len, 0,
@@ -146,12 +143,11 @@ bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out
             return false;
         }
 
-        // Sunucu Challenge isteğinde bulunduysa ('A' / 0x41)
+        // Challenge ('A' / 0x41) yanıtı geldiyse
         if (buf[0] == 0xFF && buf[1] == 0xFF && buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41)
         {
             if (recv_len >= 9)
             {
-                // Gelen 4 baytlık challenge değerini isteğin sonuna ekle ve tekrar gönder
                 memcpy(req_buf + sizeof(A2S_INFO_REQUEST), buf + 5, 4);
                 req_len = sizeof(A2S_INFO_REQUEST) + 4;
                 continue;
@@ -181,7 +177,7 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 {
     if (count <= 0) return 0;
 
-    int max_batch = 64; // Windows FD_SETSIZE varsayılanı 64'tür
+    int max_batch = 64;
     int total_valid = 0;
 
     for (int base = 0; base < count; base += max_batch)
@@ -255,7 +251,6 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 
                 DWORD elapsed = GetTickCount() - starts[i];
 
-                // Challenge Yanıtı kontrolü
                 if (recv_len >= 9 && buf[0] == 0xFF && buf[1] == 0xFF && 
                     buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41 && !challenged[i])
                 {
@@ -272,7 +267,7 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 
                     sendto(socks[i], (const char *)req_buf, sizeof(A2S_INFO_REQUEST) + 4, 0,
                            (struct sockaddr *)&dest, sizeof(dest));
-                    continue; // Cevap beklenmeye devam ediliyor
+                    continue;
                 }
 
                 if (recv_len > 0 && parse_a2s_response(buf, recv_len, &results[idx]))
@@ -288,7 +283,6 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
             }
         }
 
-        // Açık kalan soketleri temizle
         for (int i = 0; i < batch; i++)
         {
             if (socks[i] != INVALID_SOCKET)
