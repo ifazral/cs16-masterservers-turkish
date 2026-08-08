@@ -31,7 +31,7 @@ DLL = $(OUT)/$(NAME).dll
 
 default: all
 
-all: legacy anniversary goldclient
+all: legacy anniversary
 
 legacy: $(DLL)
 	mkdir -p $(OUT)/platform/servers $(OUT)/platform/config
