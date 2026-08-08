@@ -20,18 +20,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-mingw-w64-i686 g++-mingw-w64-i686
 
-      - name: Install DepotDownloader
-        run: |
-          wget -qO /tmp/dd.zip https://github.com/SteamRE/DepotDownloader/releases/latest/download/DepotDownloader-linux-x64.zip
-          sudo unzip -o /tmp/dd.zip -d /usr/local/bin/
-          sudo chmod +x /usr/local/bin/DepotDownloader
-
-      - name: Fetch ServerBrowser.dll from Steam
-        env:
-          STEAM_USERNAME: ${{ secrets.STEAM_USERNAME }}
-          STEAM_PASSWORD: ${{ secrets.STEAM_PASSWORD }}
-        run: bash scripts/fetch_originals.sh
-
       - name: Build all variants
         run: make -f Makefile.mingw
 
@@ -48,7 +36,6 @@ jobs:
           echo "mastersrv=$(sha256sum Release/mastersrv.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "sb_legacy=$(sha256sum Release/platform/servers/ServerBrowser.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
           echo "sb_anniv=$(sha256sum Release-anniversary/platform/servers/ServerBrowser.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "gold_steamapi=$(sha256sum Release-goldclient/steam_api.dll | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
       - name: Package Pre-Anniversary
         run: |
@@ -59,11 +46,6 @@ jobs:
         run: |
           cd Release-anniversary
           zip -r ../cs16-masterservers-anniversary.zip . -x '*.bak'
-
-      - name: Package GoldClient
-        run: |
-          cd Release-goldclient
-          zip -r ../cs16-masterservers-goldclient.zip . -x '*.bak'
 
       - name: Get raw log URL
         id: logs
@@ -90,7 +72,6 @@ jobs:
           artifacts: |
             cs16-masterservers-pre-anniversary.zip
             cs16-masterservers-anniversary.zip
-            cs16-masterservers-goldclient.zip
           body: |
             ## Downloads
 
@@ -98,7 +79,6 @@ jobs:
             |-------|-------------|
             | **Pre-Anniversary** | Steam Legacy build (pre-25th anniversary update) |
             | **Anniversary** | 25th Anniversary Update build |
-            | **GoldClient** | CSPro/GoldClient (non-Steam) |
 
             ## SHA-256 Hashes
 
@@ -107,7 +87,6 @@ jobs:
             | `mastersrv.dll` | `${{ steps.hashes.outputs.mastersrv }}` |
             | `ServerBrowser.dll` (pre-anniversary) | `${{ steps.hashes.outputs.sb_legacy }}` |
             | `ServerBrowser.dll` (anniversary) | `${{ steps.hashes.outputs.sb_anniv }}` |
-            | `steam_api.dll` (goldclient) | `${{ steps.hashes.outputs.gold_steamapi }}` |
 
             ## Build Info
 
