@@ -39,8 +39,10 @@ static void load_master_list()
 		snprintf(vdf_path, sizeof(vdf_path), "platform\\config\\MasterServers.vdf");
 		if (!vdf_parse_master_servers(vdf_path, &g_MasterList))
 		{
-			strcpy(g_MasterList.entries[0].addr, "ms.cs16.net:27010");
-			g_MasterList.count = 1;
+			strcpy(g_MasterList.entries[0].addr, "95.173.174.197:27010");
+			strcpy(g_MasterList.entries[1].addr, "95.173.174.198:27010");
+			strcpy(g_MasterList.entries[2].addr, "185.252.233.104:27010");
+			g_MasterList.count = 3;
 		}
 	}
 }
@@ -159,12 +161,18 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
 	RealMasterLog("Pre-initialized %d server entries, starting A2S queries", total);
 
-	const int WINDOW = 128;
+	const int WINDOW = 64;
 	const int PER_SERVER_TIMEOUT = 2000;
 
 	SOCKET socks[MAX_GAME_SERVERS];
 	DWORD sendTimes[MAX_GAME_SERVERS];
-	for (int i = 0; i < total; i++) socks[i] = INVALID_SOCKET;
+	bool challenged[MAX_GAME_SERVERS];
+
+	for (int i = 0; i < total; i++)
+	{
+		socks[i] = INVALID_SOCKET;
+		challenged[i] = false;
+	}
 
 	int nextToSend = 0;
 	int activeCount = 0;
@@ -230,6 +238,28 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
 				DWORD elapsed = GetTickCount() - sendTimes[i];
 				gameserveritem_t *gs = &data->servers[i];
+
+				// CHALLENGE (0x41) YANITI GELDİYSE TOKEN İLE YENİDEN İSTEK AT
+				if (recv_len >= 9 && buf[0] == 0xFF && buf[1] == 0xFF && 
+					buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41 && !challenged[i])
+				{
+					challenged[i] = true;
+					uint8_t req_challenge[32];
+					memcpy(req_challenge, A2S_INFO_REQUEST, 25);
+					memcpy(req_challenge + 25, buf + 5, 4);
+
+					struct sockaddr_in dest;
+					memset(&dest, 0, sizeof(dest));
+					dest.sin_family = AF_INET;
+					dest.sin_addr.s_addr = master_result.servers[i].ip;
+					dest.sin_port = master_result.servers[i].port;
+
+					sendTimes[i] = GetTickCount(); // Zaman aşımını sıfırla
+					sendto(socks[i], (const char *)req_challenge, 29, 0, (struct sockaddr *)&dest, sizeof(dest));
+
+					sel--;
+					continue; // Soketi kapatma, 0x49 yanıtını bekle!
+				}
 
 				a2s_server_info_t info;
 				memset(&info, 0, sizeof(info));
@@ -412,7 +442,7 @@ void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
 		m_refreshing = false;
 		return;
 	}
-	if (m_pRealSteam) m_pRealSteam->CancelQuery(hRequest);
+	if (m_pRealSteam) m_pRealSteam->CancelServerQuery(hRequest);
 }
 
 void CRealMasterMatchmaking::RefreshQuery(HServerListRequest hRequest)
