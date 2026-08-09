@@ -11,6 +11,12 @@
 #include "server_cache.h"
 #include "utils.h"
 
+// DERLEME HATASINI ÇÖZEN KISIM: sizeof() çalışabilmesi için baytları burada boyutlu tanımladık
+static const uint8_t A2S_INFO_REQ_BYTES[] = { 
+    0xFF, 0xFF, 0xFF, 0xFF, 0x54, 0x53, 0x6F, 0x75, 0x72, 0x63, 0x65, 0x20, 
+    0x45, 0x6E, 0x67, 0x69, 0x6E, 0x65, 0x20, 0x51, 0x75, 0x65, 0x72, 0x79, 0x00 
+};
+
 extern void RealMasterLog(const char *fmt, ...);
 
 static CRealMasterMatchmaking g_RealMaster;
@@ -160,7 +166,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 		gs->m_bHadSuccessfulResponse = false;
 	}
 	
-	MemoryBarrier(); // Array'in arayüze hazır olduğundan emin ol
+	MemoryBarrier(); // Dizi verilerinin UI tarafında sorunsuz okunabilmesi için bariyer
 	*data->serverCount = total;
 
 	RealMasterLog("Pre-initialized %d server entries, starting A2S queries", total);
@@ -188,7 +194,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 		dest.sin_port = master_result.servers[idx].port;
 
 		sendTimes[idx] = GetTickCount();
-		sendto(socks[idx], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+		sendto(socks[idx], (const char *)A2S_INFO_REQ_BYTES, sizeof(A2S_INFO_REQ_BYTES), 0,
 			(struct sockaddr *)&dest, sizeof(dest));
 		activeCount++;
 	};
@@ -241,8 +247,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 				memset(&info, 0, sizeof(info));
 				if (recv_len > 0 && parse_a2s_response(buf, recv_len, &info))
 				{
-					// Race condition çökmesini önlemek için veriler yazılmadan
-					// m_bHadSuccessfulResponse true YAPILMAMALIDIR!
 					gs->m_nPing = (int)elapsed;
 					gs->SetName(info.name);
 					strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
@@ -255,7 +259,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 					gs->m_bPassword = info.password != 0;
 					gs->m_bSecure = info.secure != 0;
 					
-					MemoryBarrier(); // Tüm stringler güvenli kopyalandıktan sonra arayüze aç
+					MemoryBarrier(); // Verilerin güvenli aktarılması
 					gs->m_bHadSuccessfulResponse = true;
 					
 					responded++;
@@ -403,7 +407,7 @@ gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hR
 {
 	if (IsOurRequest(hRequest, m_requestCounter))
 	{
-		// Motordan gelen 'iServer' isteğini arkaplandaki karışık indekslerimize Map ediyoruz.
+		// Motordan gelen ardışık 'iServer' isteğini arka planda maplediğimiz karışık index'e çeviriyoruz
 		if (iServer < 0 || iServer >= m_lastDispatchedIdx) return NULL;
 		return &m_servers[g_DispatchedIndices[iServer]];
 	}
@@ -458,7 +462,6 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 		
 		if (m_servers[i].m_bHadSuccessfulResponse)
 		{
-			// NULL POINTER CRASH ÇÖZÜMÜ: Motora karışık indeks değil, 0, 1, 2 şeklinde ardışık UI indeksi gönderiyoruz.
 			int uiIndex = m_lastDispatchedIdx;
 			g_DispatchedIndices[uiIndex] = i; 
 			
@@ -467,7 +470,7 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 			dispatched++;
 			
 			m_pResponse->ServerResponded(hReq, uiIndex);
-			if (!m_pResponse) break; // Re-entrancy iptali koruması
+			if (!m_pResponse) break; 
 		}
 		else if (m_queryDone)
 		{
@@ -530,7 +533,6 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
 		return;
 	}
 	
-	// 'iServer' motordan UI sırasına göre gelir. Bunu map ile orijinal arka plan indeksimize çeviriyoruz.
 	if (iServer < 0 || iServer >= m_lastDispatchedIdx) return;
 	gameserveritem_t *gs = &m_servers[g_DispatchedIndices[iServer]];
 
