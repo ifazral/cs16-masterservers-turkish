@@ -18,8 +18,6 @@ static const uint8_t A2S_INFO_REQ_BYTES[] = {
 
 extern void RealMasterLog(const char *fmt, ...);
 
-// --- DEBUG SİSTEMİ ---
-// UI ve Motor spam loglarını görmek istiyorsanız true kalsın. Kapatmak için false yapın.
 bool g_bVerboseDebug = true; 
 
 static void VerboseLog(const char* fmt, ...) 
@@ -32,14 +30,12 @@ static void VerboseLog(const char* fmt, ...)
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
 
-    // Hem DebugView (Canlı izleme) aracına hem de normal loga gönder
     OutputDebugStringA("[CRealMasterMatchmaking] ");
     OutputDebugStringA(buffer);
     OutputDebugStringA("\n");
     
     RealMasterLog("[VERBOSE] %s", buffer);
 }
-// ---------------------
 
 static CRealMasterMatchmaking g_RealMaster;
 static master_list_t g_MasterList;
@@ -123,8 +119,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
     };
 
     RealMasterLog("QueryThread started [ID: %u]", myReqId);
-    VerboseLog("Thread %u running...", myReqId);
-
     load_master_list();
 
     master_query_result_t master_result;
@@ -133,11 +127,9 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
     for (int m = 0; m < g_MasterList.count && is_active(); m++)
     {
-        VerboseLog("Requesting servers from master %s", g_MasterList.entries[m].addr);
         master_query_result_t result;
         if (master_query_servers(g_MasterList.entries[m].addr, &result))
         {
-            VerboseLog("Received %d server IPs from Master Server", result.count);
             for (int i = 0; i < result.count && total < MAX_GAME_SERVERS; i++)
             {
                 master_result.servers[total] = result.servers[i];
@@ -147,10 +139,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         }
     }
 
-    if (!is_active()) { 
-        VerboseLog("Thread %u killed before reading cache.", myReqId); 
-        delete data; return 0; 
-    }
+    if (!is_active()) { delete data; return 0; }
 
     if (total == 0)
     {
@@ -165,7 +154,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 master_result.servers[i].port = cache.servers[i].port;
             }
             total = cache.count;
-            VerboseLog("Loaded %d servers from fallback cache.", total);
         }
     }
     else
@@ -195,8 +183,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         gs->m_bHadSuccessfulResponse = false;
     }
     *data->serverCount = total;
-
-    VerboseLog("A2S Queries starting for %d servers...", total);
 
     const int WINDOW = 64;
     const int PER_SERVER_TIMEOUT = 2000;
@@ -273,10 +259,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
                     (struct sockaddr *)&from, &fromlen);
 
-                if (!is_active()) {
-                    VerboseLog("Thread %u aborted during socket read.", myReqId);
-                    break;
-                }
+                if (!is_active()) break;
 
                 DWORD elapsed = GetTickCount() - sendTimes[i];
                 gameserveritem_t *gs = &data->servers[i];
@@ -326,11 +309,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                     MemoryBarrier(); 
                     gs->m_bHadSuccessfulResponse = true;
                     responded++;
-                    
-                    // Her 10 sunucuda bir konsolu spamlama amacıyla log sınırlandı
-                    if (responded % 10 == 0) {
-                        VerboseLog("Parsed A2S_INFO for 10 more servers. Total so far: %d", responded);
-                    }
                 }
 
                 closesocket(socks[i]);
@@ -373,8 +351,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
             closesocket(socks[i]);
     }
 
-    VerboseLog("QueryThread [ID: %u] exiting naturally. Processed: %d, Responded: %d", myReqId, finished, responded);
-    
     if (is_active()) {
         self->m_queryDone = true;
     }
@@ -390,15 +366,11 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
     m_requestCounter++; 
     m_cancelRequested = true;
 
-    VerboseLog("UI Called RequestInternetServerList | New ID: %u", m_requestCounter);
-
     if (m_hThread)
     {
         if (IsThreadAlive(m_hThread))
         {
-            VerboseLog("Waiting for previous Thread to safely close...");
             WaitForSingleObject(m_hThread, INFINITE);
-            VerboseLog("Previous thread closed safely.");
         }
         CloseHandle(m_hThread); 
         m_hThread = NULL;
@@ -463,7 +435,6 @@ void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        VerboseLog("UI Called ReleaseRequest for ID: %u", (uint32_t)(uintptr_t)hRequest);
         m_cancelRequested = true;
         m_refreshing = false;
         
@@ -485,22 +456,22 @@ gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hR
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        // Spams too much if enabled for every tick, we log mostly out-of-bounds attempts
-        if (iServer < 0 || iServer >= m_serverCount) {
-            VerboseLog("WARNING: UI tried to access invalid Server Index %d (Max: %d)", iServer, m_serverCount);
-            return NULL;
+        // KRİTİK ÇÖZÜM: Motor asla NULL almamalı. Geçersiz index durumunda bile 
+        // güvenli bir dizi elemanı döndürerek "movl (%eax), %edx" crash hatasını tamamen engelliyoruz.
+        if (iServer < 0 || iServer >= MAX_GAME_SERVERS) 
+        {
+            return &m_servers[0];
         }
         return &m_servers[iServer];
     }
     if (m_pRealSteam) return m_pRealSteam->GetServerDetails(hRequest, iServer);
-    return NULL;
+    return &m_servers[0];
 }
 
 void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        VerboseLog("UI Called CancelQuery for ID: %u", m_requestCounter);
         m_cancelRequested = true;
         
         if (m_hThread && IsThreadAlive(m_hThread)) {
@@ -557,10 +528,6 @@ void CRealMasterMatchmaking::DispatchCallbacks()
             m_lastDispatchedIdx++;
         }
     }
-    
-    if (dispatched > 0) {
-        VerboseLog("Engine requested dispatch: Handed %d servers to UI. (Total Dispatched: %d)", dispatched, m_lastDispatchedIdx);
-    }
 
     if (m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
     {
@@ -568,7 +535,6 @@ void CRealMasterMatchmaking::DispatchCallbacks()
         for (int i = 0; i < m_serverCount; i++)
             if (m_servers[i].m_bHadSuccessfulResponse) responded++;
             
-        VerboseLog("Query Done & UI List is Full. Dispatched RefreshComplete.");
         EMatchMakingServerResponse resp = (m_serverCount > 0) ?
             eServerResponded : eNoServersListedOnMasterServer;
         m_pResponse->RefreshComplete(hReq, resp);
@@ -608,9 +574,7 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
         if (m_pRealSteam) m_pRealSteam->RefreshServer(hRequest, iServer);
         return;
     }
-    if (iServer < 0 || iServer >= m_serverCount) return;
-    
-    VerboseLog("UI Requested Refresh for Server Index: %d", iServer);
+    if (iServer < 0 || iServer >= MAX_GAME_SERVERS) return;
 
     gameserveritem_t *gs = &m_servers[iServer];
     uint32_t ip_net = htonl(gs->m_NetAdr.GetIP());
