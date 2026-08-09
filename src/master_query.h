@@ -27,6 +27,7 @@ typedef struct {
 } master_query_result_t;
 
 typedef struct {
+    char hostname[128]; // dllmain.cpp uyumluluğu için eklendi
     char gamedir[32];
     char map[64];
     char version[32];
