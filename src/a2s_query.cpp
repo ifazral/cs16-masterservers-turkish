@@ -8,7 +8,7 @@
 #include "a2s_query.h"
 
 // OyunYöneticisi ve ReHLDS uyumlu A2S_INFO istek paketi
-static const uint8_t A2S_INFO_REQUEST[] = {
+const uint8_t A2S_INFO_REQUEST[] = {
     0xFF, 0xFF, 0xFF, 0xFF,
     0x54,
     'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00,
@@ -263,7 +263,8 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
                     dest.sin_addr.s_addr = ips[idx];
                     dest.sin_port = ports[idx];
 
-                    sendto(socks[i], (const char *)req_challenge, sizeof(A2S_INFO_REQUEST) + 4, 0,
+                    // Düzeltme: req_challenge yerine doğru değişken olan req_buf gönderiliyor
+                    sendto(socks[i], (const char *)req_buf, sizeof(A2S_INFO_REQUEST) + 4, 0,
                            (struct sockaddr *)&dest, sizeof(dest));
                     continue;
                 }
