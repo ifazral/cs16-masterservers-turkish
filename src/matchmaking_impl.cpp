@@ -22,7 +22,7 @@ struct QueryThreadData
     CRealMasterMatchmaking *self;
     gameserveritem_t *servers;
     volatile int *serverCount;
-    uint32_t reqId; // Çakışmaları önlemek için Thread Kimliği
+    uint32_t reqId; // Çakışmaları önlemek için her sorguya özel kimlik numarası
 };
 
 static void load_master_list()
@@ -85,10 +85,11 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 {
     QueryThreadData *data = (QueryThreadData *)param;
     uint32_t myReqId = data->reqId;
-    
-    // GÜVENLİK: Eğer yeni bir liste çağrısı gelirse, eski thread donma yapmadan sessizce kendini sonlandıracak.
-    auto should_cancel = [&]() {
-        return data->self->m_cancelRequested || data->self->m_requestCounter != myReqId;
+    CRealMasterMatchmaking *self = data->self;
+
+    // GÜVENLİK: Eski threadlerin oyunu çökertmesini engelleyen kontrol mekanizması
+    auto is_active = [&]() {
+        return !self->m_cancelRequested && self->m_requestCounter == myReqId;
     };
 
     RealMasterLog("QueryThread started [ID: %u]", myReqId);
@@ -100,7 +101,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
     memset(&master_result, 0, sizeof(master_result));
     int total = 0;
 
-    for (int m = 0; m < g_MasterList.count && !should_cancel(); m++)
+    for (int m = 0; m < g_MasterList.count && is_active(); m++)
     {
         RealMasterLog("Querying master %s ...", g_MasterList.entries[m].addr);
         master_query_result_t result;
@@ -116,7 +117,9 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         }
     }
 
-    if (total == 0 && !should_cancel())
+    if (!is_active()) { delete data; return 0; }
+
+    if (total == 0)
     {
         RealMasterLog("No servers from masters, trying cache");
         char cache_path[512];
@@ -133,7 +136,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
             RealMasterLog("Loaded %d servers from cache", total);
         }
     }
-    else if (!should_cancel())
+    else
     {
         char cache_path[512];
         snprintf(cache_path, sizeof(cache_path), "%s\\cache\\servers.dat", g_PluginDir);
@@ -148,7 +151,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         cache_save(cache_path, &cache);
     }
 
-    if (should_cancel()) { data->self->m_queryDone = true; delete data; return 0; }
+    if (!is_active()) { delete data; return 0; }
 
     for (int i = 0; i < total; i++)
     {
@@ -197,13 +200,13 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         activeCount++;
     };
 
-    while (nextToSend < total && activeCount < WINDOW && !should_cancel())
+    while (nextToSend < total && activeCount < WINDOW && is_active())
     {
         sendQuery(nextToSend);
         nextToSend++;
     }
 
-    while (activeCount > 0 && !should_cancel())
+    while (activeCount > 0 && is_active())
     {
         fd_set readfds;
         FD_ZERO(&readfds);
@@ -238,6 +241,8 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
                     (struct sockaddr *)&from, &fromlen);
 
+                if (!is_active()) break;
+
                 DWORD elapsed = GetTickCount() - sendTimes[i];
                 gameserveritem_t *gs = &data->servers[i];
 
@@ -267,16 +272,13 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 if (recv_len > 0 && parse_a2s_response(buf, recv_len, &info))
                 {
                     gs->m_nPing = (int)elapsed;
-                    gs->m_bHadSuccessfulResponse = true;
                     gs->SetName(info.name);
                     
-                    // GÜVENLİK: 12010 Build Motor Çökmesi için String Null-Terminator (Sıfırlandırıcı) Eklendi!
+                    // GÜVENLİK: Buffer Overflow (Taşma) çökmelerini önlemek için Null Terminator eklendi
                     strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
                     gs->m_szMap[sizeof(gs->m_szMap) - 1] = '\0';
-                    
                     strncpy(gs->m_szGameDir, info.gamedir, sizeof(gs->m_szGameDir) - 1);
                     gs->m_szGameDir[sizeof(gs->m_szGameDir) - 1] = '\0';
-                    
                     strncpy(gs->m_szGameDescription, info.gamedesc, sizeof(gs->m_szGameDescription) - 1);
                     gs->m_szGameDescription[sizeof(gs->m_szGameDescription) - 1] = '\0';
                     
@@ -286,6 +288,9 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                     gs->m_nBotPlayers = info.bots;
                     gs->m_bPassword = info.password != 0;
                     gs->m_bSecure = info.secure != 0;
+                    
+                    // GÜVENLİK: UI Çökmesini engellemek için Response sinyali en son veriliyor.
+                    gs->m_bHadSuccessfulResponse = true;
                     responded++;
                 }
 
@@ -295,7 +300,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 finished++;
                 sel--;
 
-                if (nextToSend < total && !should_cancel())
+                if (nextToSend < total && is_active())
                 {
                     sendQuery(nextToSend);
                     nextToSend++;
@@ -314,7 +319,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 activeCount--;
                 finished++;
 
-                if (nextToSend < total && !should_cancel())
+                if (nextToSend < total && is_active())
                 {
                     sendQuery(nextToSend);
                     nextToSend++;
@@ -330,7 +335,12 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
     }
 
     RealMasterLog("QueryThread finished: %d total, %d responded, %d processed", total, responded, finished);
-    if (!should_cancel()) data->self->m_queryDone = true;
+    
+    // Yalnızca bu thread HALA AKTİFSE sistemi "Sorgu Bitti" olarak işaretle (Çökme Engeli)
+    if (is_active()) {
+        self->m_queryDone = true;
+    }
+    
     delete data;
     return 0;
 }
@@ -341,15 +351,16 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
 {
     RealMasterLog("RequestInternetServerList(appID=%u, nFilters=%u, pResponse=%p)", iApp, nFilters, pResponse);
 
-    // GÜVENLİK: Eski thread'i dondurmadan (Wait atmadan) iptal et. ID'si değişeceği için arka planda intihar edecek.
+    // GÜVENLİK: Yeni bir istek geldiğinde sayacı anında artırıyoruz.
+    // Bu sayede arkada çalışan eski thread, yeni sayacı görüp anında intihar edecek.
+    m_requestCounter++; 
+
     if (m_hThread)
     {
-        m_cancelRequested = true;
-        CloseHandle(m_hThread);
+        CloseHandle(m_hThread); // Eski handle'ı kapat (thread kendi kendine yok olacak)
         m_hThread = NULL;
     }
 
-    m_requestCounter++; // Thread kimliğini değiştirerek çakışmayı sıfırla
     m_serverCount = 0;
     m_refreshing = true;
     m_queryDone = false;
@@ -449,8 +460,6 @@ void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
         m_refreshing = false;
         return;
     }
-    
-    // GÜVENLİK: Çökmeye sebep olan hatalı fonksiyon düzeltildi.
     if (m_pRealSteam) m_pRealSteam->CancelQuery(hRequest);
 }
 
@@ -547,15 +556,12 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
     uint16_t port_net = htons(gs->m_NetAdr.GetQueryPort());
 
     a2s_server_info_t info;
-    memset(&info, 0, sizeof(info)); // GÜVENLİK: Memory Leak ve Okuma Hatasına Karşı Temizlendi
-    
+    memset(&info, 0, sizeof(info));
     if (a2s_query_server(ip_net, port_net, &info))
     {
         gs->m_nPing = info.ping_ms;
-        gs->m_bHadSuccessfulResponse = true;
         gs->SetName(info.name);
         
-        // GÜVENLİK: 12010 Build Motor Çökmesi için String Null-Terminator (Sıfırlandırıcı) Eklendi!
         strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
         gs->m_szMap[sizeof(gs->m_szMap) - 1] = '\0';
         
@@ -564,6 +570,7 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
         gs->m_nBotPlayers = info.bots;
         gs->m_bPassword = info.password != 0;
         gs->m_bSecure = info.secure != 0;
+        gs->m_bHadSuccessfulResponse = true;
     }
 }
 
