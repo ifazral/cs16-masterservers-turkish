@@ -8,7 +8,8 @@
 extern "C" {
 #endif
 
-extern const uint8_t A2S_INFO_REQUEST[];
+// Boyut [25] olarak belirtildi. Linkage ve sizeof() hatalarını önler!
+extern const uint8_t A2S_INFO_REQUEST[25];
 extern const size_t A2S_INFO_REQUEST_LEN;
 
 typedef struct {
