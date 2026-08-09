@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-// Boyut [25] olarak belirtildi. Linkage ve sizeof() hatalarını önler!
+// DERLEME HATASINI ÇÖZEN KISIM: [] yerine [25] yazıldı.
 extern const uint8_t A2S_INFO_REQUEST[25];
 extern const size_t A2S_INFO_REQUEST_LEN;
 
