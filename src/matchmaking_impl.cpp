@@ -454,17 +454,24 @@ void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
 
 gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hRequest, int iServer)
 {
+    // KESİN ÇÖZÜM: Motorun asla NULL (0x0) pointer alıp "movl (%eax), %edx" hatasıyla
+    // çökmemesi için geçersiz isteklerde veya indeks hatalarında KESİNLİKLE m_servers[0] döndürüyoruz.
+    if (iServer < 0 || iServer >= MAX_GAME_SERVERS) 
+    {
+        return &m_servers[0];
+    }
+
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        // KRİTİK ÇÖZÜM: Motor asla NULL almamalı. Geçersiz index durumunda bile 
-        // güvenli bir dizi elemanı döndürerek "movl (%eax), %edx" crash hatasını tamamen engelliyoruz.
-        if (iServer < 0 || iServer >= MAX_GAME_SERVERS) 
-        {
-            return &m_servers[0];
-        }
         return &m_servers[iServer];
     }
-    if (m_pRealSteam) return m_pRealSteam->GetServerDetails(hRequest, iServer);
+
+    if (m_pRealSteam) 
+    {
+        gameserveritem_t *pRealServer = m_pRealSteam->GetServerDetails(hRequest, iServer);
+        if (pRealServer != NULL) return pRealServer;
+    }
+
     return &m_servers[0];
 }
 
