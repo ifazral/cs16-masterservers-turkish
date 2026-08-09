@@ -19,7 +19,6 @@
 #define SOCKET_ERROR (-1)
 #endif
 
-// Standart A2S_INFO istek paketi tanımı[cite: 1]
 const uint8_t A2S_INFO_REQUEST[] = {
     0xFF, 0xFF, 0xFF, 0xFF,
     0x54, // 'T'
@@ -34,14 +33,14 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *info)
     if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
         return false;
     
-    // 0x49 = A2S_INFO yanıt başlığı
-    if (data[4] != 0x49)
+    uint8_t header = data[4];
+    // GoldSource ('m' / 0x6d) ve Source ('I' / 0x49) yanıt başlıklarının her ikisini de destekle
+    if (header != 0x49 && header != 0x6d)
         return false;
 
     if (info) {
         memset(info, 0, sizeof(*info));
         int pos = 5;
-        pos++; // protocol
 
         auto read_string = [&](char *dest, int max_len) {
             int start = pos;
@@ -55,22 +54,42 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *info)
             }
         };
 
-        read_string(info->name, sizeof(info->name));
-        read_string(info->map, sizeof(info->map));
-        read_string(info->gamedir, sizeof(info->gamedir));
-        read_string(info->gamedesc, sizeof(info->gamedesc));
+        if (header == 0x6d) {
+            // GoldSource eski formatı (Önce Server IP stringi gelir)
+            char ip_str[64];
+            read_string(ip_str, sizeof(ip_str));
+            read_string(info->name, sizeof(info->name));
+            read_string(info->map, sizeof(info->map));
+            read_string(info->gamedir, sizeof(info->gamedir));
+            read_string(info->gamedesc, sizeof(info->gamedesc));
 
-        if (pos + 2 <= len) {
-            info->appid = (data[pos] | (data[pos+1] << 8));
-            pos += 2;
+            if (pos < len) info->players = data[pos++];
+            if (pos < len) info->max_players = data[pos++];
+            if (pos < len) info->protocol = data[pos++];
+            if (pos < len) info->is_dedicated = (data[pos++] == 'd');
+            if (pos < len) pos++; // environment
+            if (pos < len) info->password = (data[pos++] != 0);
+            if (pos < len) info->secure = (data[pos++] != 0);
+        } else {
+            // Source / Modern format (0x49)
+            if (pos < len) info->protocol = data[pos++];
+            read_string(info->name, sizeof(info->name));
+            read_string(info->map, sizeof(info->map));
+            read_string(info->gamedir, sizeof(info->gamedir));
+            read_string(info->gamedesc, sizeof(info->gamedesc));
+
+            if (pos + 2 <= len) {
+                info->appid = (data[pos] | (data[pos+1] << 8));
+                pos += 2;
+            }
+            if (pos < len) info->players = data[pos++];
+            if (pos < len) info->max_players = data[pos++];
+            if (pos < len) info->bots = data[pos++];
+            if (pos < len) info->is_dedicated = (data[pos++] == 'd');
+            if (pos < len) pos++; // environment
+            if (pos < len) info->password = (data[pos++] != 0);
+            if (pos < len) info->secure = (data[pos++] != 0);
         }
-        if (pos < len) info->players = data[pos++];
-        if (pos < len) info->max_players = data[pos++];
-        if (pos < len) info->bots = data[pos++];
-        if (pos < len) info->is_dedicated = (data[pos++] == 'd');
-        if (pos < len) pos++; // environment
-        if (pos < len) info->password = (data[pos++] != 0);
-        if (pos < len) info->secure = (data[pos++] != 0);
     }
     return true;
 }
