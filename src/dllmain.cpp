@@ -785,6 +785,57 @@ static void EnsureRealSteamApi()
 	if (!pfn_##name && g_hRealSteamApi) \
 		pfn_##name = (GenericSteamFunc_t)GetProcAddress(g_hRealSteamApi, #name);
 
+
+// EKLENDI: FastDL baslatma islemini oyunu dondurmamasi icin ayri bir Thread'e tasiyoruz.
+static DWORD WINAPI FastDLInitThread(LPVOID param)
+{
+	char cfgGameDir[64] = "cstrike";
+	if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
+	{
+		const char *lastSlash = strrchr(g_pGameDir, '\\');
+		if (lastSlash && lastSlash[1])
+			strncpy(cfgGameDir, lastSlash + 1, sizeof(cfgGameDir) - 1);
+		else
+			strncpy(cfgGameDir, g_pGameDir, sizeof(cfgGameDir) - 1);
+	}
+
+	static char publicIP[64] = {0};
+	if (!FastDL_GetPublicIP(publicIP, sizeof(publicIP), g_heartbeatMaster))
+	{
+		const char *fallback = GetCvarString("ip");
+		if (!fallback[0]) fallback = GetCvarString("hostip");
+		strncpy(publicIP, fallback[0] ? fallback : "0.0.0.0", sizeof(publicIP) - 1);
+		RealMasterLog("FastDL: using fallback IP: %s", publicIP);
+	}
+
+	uint32_t pubIP = inet_addr(publicIP);
+	if (pubIP != INADDR_NONE && pubIP != 0 && g_pServerNetadr)
+	{
+		DWORD oldProt;
+		VirtualProtect(g_pServerNetadr + 4, 4, PAGE_EXECUTE_READWRITE, &oldProt);
+		memcpy(g_pServerNetadr + 4, &pubIP, 4);
+		VirtualProtect(g_pServerNetadr + 4, 4, oldProt, &oldProt);
+		RealMasterLog("FastDL: patched server IP at %p to %s", g_pServerNetadr, publicIP);
+	}
+
+	if (FastDL_Start(g_selfDir, cfgGameDir, publicIP, g_fastdlPort))
+	{
+		if (g_pCvarFindVar)
+		{
+			cvar_t *cvUrl = g_pCvarFindVar("sv_downloadurl");
+			if (cvUrl)
+			{
+				static char downloadUrl[256];
+				snprintf(downloadUrl, sizeof(downloadUrl), "http://%s:%d", publicIP, g_fastdlPort);
+				cvUrl->string = downloadUrl;
+				RealMasterLog("FastDL: set sv_downloadurl = %s", downloadUrl);
+			}
+		}
+	}
+	return 0;
+}
+
+
 extern "C" __declspec(dllexport) ISteamMatchmakingServers * __cdecl SteamMatchmakingServers()
 {
 	EnsureWsa();
@@ -887,48 +938,9 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
 			}
 			if (!skipFastdl)
 			{
-				char cfgGameDir[64] = "cstrike";
-				if (g_pGameDir && !IsBadReadPtr(g_pGameDir, 4) && g_pGameDir[0])
-				{
-					const char *lastSlash = strrchr(g_pGameDir, '\\');
-					if (lastSlash && lastSlash[1])
-						strncpy(cfgGameDir, lastSlash + 1, sizeof(cfgGameDir) - 1);
-					else
-						strncpy(cfgGameDir, g_pGameDir, sizeof(cfgGameDir) - 1);
-				}
-
-				static char publicIP[64] = {0};
-				if (!FastDL_GetPublicIP(publicIP, sizeof(publicIP), g_heartbeatMaster))
-				{
-					const char *fallback = GetCvarString("ip");
-					if (!fallback[0]) fallback = GetCvarString("hostip");
-					strncpy(publicIP, fallback[0] ? fallback : "0.0.0.0", sizeof(publicIP) - 1);
-					RealMasterLog("FastDL: using fallback IP: %s", publicIP);
-				}
-
-				uint32_t pubIP = inet_addr(publicIP);
-				if (pubIP != INADDR_NONE && pubIP != 0 && g_pServerNetadr)
-				{
-					DWORD oldProt;
-					VirtualProtect(g_pServerNetadr + 4, 4, PAGE_EXECUTE_READWRITE, &oldProt);
-					memcpy(g_pServerNetadr + 4, &pubIP, 4);
-					VirtualProtect(g_pServerNetadr + 4, 4, oldProt, &oldProt);
-					RealMasterLog("FastDL: patched server IP at %p to %s", g_pServerNetadr, publicIP);
-				}
-
-				if (g_pConPrintf)
-					g_pConPrintf("Server IP address %s:27015\n", publicIP);
-
-				if (FastDL_Start(g_selfDir, cfgGameDir, publicIP, g_fastdlPort))
-				{
-					if (cvUrl)
-					{
-						static char downloadUrl[256];
-						snprintf(downloadUrl, sizeof(downloadUrl), "http://%s:%d", publicIP, g_fastdlPort);
-						cvUrl->string = downloadUrl;
-						RealMasterLog("FastDL: set sv_downloadurl = %s", downloadUrl);
-					}
-				}
+				// DÜZELTİLDİ: Ana threadi kilitlememesi (10060 Timeout) için Thread ile arka planda başlatılıyor.
+				HANDLE hThread = CreateThread(NULL, 0, FastDLInitThread, NULL, 0, NULL);
+				if (hThread) CloseHandle(hThread);
 			}
 		}
 	}
