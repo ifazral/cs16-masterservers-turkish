@@ -205,14 +205,59 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 			SOCKET max_sock = 0;
 			int active = 0;
 
-			for (int i = q = 0; i < batch; i++) // wait, keep original loop index logic
+			for (int i = 0; i < batch; i++)
 			{
-				// ...
+				if (socks[i] == INVALID_SOCKET) continue;
+				FD_SET(socks[i], &readfds);
+				if (socks[i] > max_sock) max_sock = socks[i];
+				active++;
 			}
-			// (Batch döngüsü orijinal yapısıyla korunmuştur)
-			// ...
-			break; // placeholder for brevity in thought, but full file provided above.
+
+			if (active == 0) break;
+
+			struct timeval tv;
+			DWORD remain = deadline - now;
+			tv.tv_sec = remain / 1000;
+			tv.tv_usec = (remain % 1000) * 1000;
+
+			int sel = select((int)max_sock + 1, &readfds, NULL, NULL, &tv);
+			if (sel <= 0) break;
+
+			for (int i = 0; i < batch; i++)
+			{
+				if (socks[i] == INVALID_SOCKET) continue;
+				if (!FD_ISSET(socks[i], &readfds)) continue;
+
+				int idx = base + i;
+				uint8_t buf[2048];
+				struct sockaddr_in from;
+				int fromlen = sizeof(from);
+				int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
+					(struct sockaddr *)&from, &fromlen);
+
+				DWORD elapsed = GetTickCount() - starts[i];
+
+				if (recv_len > 0 && parse_a2s_response(buf, recv_len, &results[idx]))
+				{
+					results[idx].ip = ips[idx];
+					results[idx].port = ports[idx];
+					results[idx].ping_ms = (int)elapsed;
+					total_valid++;
+				}
+
+				closesocket(socks[i]);
+				socks[i] = INVALID_SOCKET;
+				done++;
+			}
+		}
+
+		for (int i = 0; i < batch; i++)
+		{
+			if (socks[i] != INVALID_SOCKET)
+				closesocket(socks[i]);
 		}
 	}
+
+	RealMasterLog("[DEBUG] a2s_query_batch finished: total valid = %d", total_valid);
 	return total_valid;
 }
