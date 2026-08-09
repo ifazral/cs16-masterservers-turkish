@@ -30,18 +30,14 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
     if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
         return false;
 
-    if (data[4] == 0x41)
-    {
-        return false; // Challenge paketi
-    }
+    if (data[4] == 0x41) return false;
 
     memset(out, 0, sizeof(*out));
     int pos = 5;
 
-    // IF-ELSE mantığı ile paket başlığına (Header) göre ayrıştırma
     if (data[4] == 0x49) // Modern Source Formatı
     {
-        if (pos < len) pos++; // protocol byte atla
+        if (pos < len) pos++; // protocol
 
         read_string(data, len, &pos, out->name, sizeof(out->name));
         read_string(data, len, &pos, out->map, sizeof(out->map));
@@ -67,7 +63,7 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 
         read_string(data, len, &pos, out->version, sizeof(out->version));
     }
-    else if (data[4] == 0x6d) // Klasik GoldSource ('m') Formatı
+    else if (data[4] == 0x6d) // GoldSource Formatı ('m')
     {
         char ip_str[64];
         read_string(data, len, &pos, ip_str, sizeof(ip_str));
@@ -140,7 +136,6 @@ bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out
 
     if (recv_len <= 0) return false;
 
-    // Challenge (0x41) kontrolü ve yönetimi
     if (recv_len >= 9 && buf[0] == 0xFF && buf[1] == 0xFF && buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41)
     {
         SOCKET sock2 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -265,7 +260,6 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 
                 if (recv_len > 0)
                 {
-                    // Batch içerisinde challenge (0x41) gelirse yakalayabilmek için temel parse
                     if (recv_len >= 9 && buf[4] == 0x41)
                     {
                         struct sockaddr_in dest;
@@ -280,7 +274,7 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
 
                         sendto(socks[i], (const char *)challenge_pkt, sizeof(challenge_pkt), 0,
                             (struct sockaddr *)&dest, sizeof(dest));
-                        starts[i] = GetTickCount(); // Zaman aşımını tazele
+                        starts[i] = GetTickCount();
                         continue;
                     }
 
