@@ -19,17 +19,27 @@
 #define SOCKET_ERROR (-1)
 #endif
 
-const uint8_t A2S_INFO_REQUEST[] = {
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// extern "C" içine alınarak 0x00000000 Page Fault (crash) sorunu giderildi
+const uint8_t A2S_INFO_REQUEST[25] = {
     0xFF, 0xFF, 0xFF, 0xFF,
     0x54, // 'T'
     'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y',
     0x00
 };
-const size_t A2S_INFO_REQUEST_LEN = sizeof(A2S_INFO_REQUEST);
+const size_t A2S_INFO_REQUEST_LEN = 25;
+
+#ifdef __cplusplus
+}
+#endif
 
 bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *info)
 {
-    if (len < 6) return false;
+    // data veya info NULL gelirse çökmeyi engellemek için güvenlik eklendi
+    if (len < 6 || !data || !info) return false;
     if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
         return false;
     
@@ -38,58 +48,56 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *info)
     if (header != 0x49 && header != 0x6d)
         return false;
 
-    if (info) {
-        memset(info, 0, sizeof(*info));
-        int pos = 5;
+    memset(info, 0, sizeof(*info));
+    int pos = 5;
 
-        auto read_string = [&](char *dest, int max_len) {
-            int start = pos;
-            while (pos < len && data[pos] != '\0') pos++;
-            if (pos < len) {
-                int slen = pos - start;
-                if (slen >= max_len) slen = max_len - 1;
-                memcpy(dest, &data[start], slen);
-                dest[slen] = '\0';
-                pos++;
-            }
-        };
+    // Buffer-overflow önleyici geliştirilmiş güvenli string okuyucu
+    auto read_string = [&](char *dest, int max_len) {
+        if (pos >= len) return;
+        int start = pos;
+        while (pos < len && data[pos] != '\0') pos++;
+        int slen = pos - start;
+        if (slen >= max_len) slen = max_len - 1;
+        if (slen > 0) memcpy(dest, &data[start], slen);
+        dest[slen] = '\0';
+        if (pos < len) pos++; // Null byte'ı atla
+    };
 
-        if (header == 0x6d) {
-            // GoldSource eski formatı (Önce Server IP stringi gelir)
-            char ip_str[64];
-            read_string(ip_str, sizeof(ip_str));
-            read_string(info->name, sizeof(info->name));
-            read_string(info->map, sizeof(info->map));
-            read_string(info->gamedir, sizeof(info->gamedir));
-            read_string(info->gamedesc, sizeof(info->gamedesc));
+    if (header == 0x6d) {
+        // GoldSource eski formatı (Önce Server IP stringi gelir)
+        char ip_str[64];
+        read_string(ip_str, sizeof(ip_str));
+        read_string(info->name, sizeof(info->name));
+        read_string(info->map, sizeof(info->map));
+        read_string(info->gamedir, sizeof(info->gamedir));
+        read_string(info->gamedesc, sizeof(info->gamedesc));
 
-            if (pos < len) info->players = data[pos++];
-            if (pos < len) info->max_players = data[pos++];
-            if (pos < len) info->protocol = data[pos++];
-            if (pos < len) info->is_dedicated = (data[pos++] == 'd');
-            if (pos < len) pos++; // environment
-            if (pos < len) info->password = (data[pos++] != 0);
-            if (pos < len) info->secure = (data[pos++] != 0);
-        } else {
-            // Source / Modern format (0x49)
-            if (pos < len) info->protocol = data[pos++];
-            read_string(info->name, sizeof(info->name));
-            read_string(info->map, sizeof(info->map));
-            read_string(info->gamedir, sizeof(info->gamedir));
-            read_string(info->gamedesc, sizeof(info->gamedesc));
+        if (pos < len) info->players = data[pos++];
+        if (pos < len) info->max_players = data[pos++];
+        if (pos < len) info->protocol = data[pos++];
+        if (pos < len) info->is_dedicated = (data[pos++] == 'd');
+        if (pos < len) pos++; // environment
+        if (pos < len) info->password = (data[pos++] != 0);
+        if (pos < len) info->secure = (data[pos++] != 0);
+    } else {
+        // Source / Modern format (0x49)
+        if (pos < len) info->protocol = data[pos++];
+        read_string(info->name, sizeof(info->name));
+        read_string(info->map, sizeof(info->map));
+        read_string(info->gamedir, sizeof(info->gamedir));
+        read_string(info->gamedesc, sizeof(info->gamedesc));
 
-            if (pos + 2 <= len) {
-                info->appid = (data[pos] | (data[pos+1] << 8));
-                pos += 2;
-            }
-            if (pos < len) info->players = data[pos++];
-            if (pos < len) info->max_players = data[pos++];
-            if (pos < len) info->bots = data[pos++];
-            if (pos < len) info->is_dedicated = (data[pos++] == 'd');
-            if (pos < len) pos++; // environment
-            if (pos < len) info->password = (data[pos++] != 0);
-            if (pos < len) info->secure = (data[pos++] != 0);
+        if (pos + 1 < len) {
+            info->appid = (data[pos] | (data[pos+1] << 8));
+            pos += 2;
         }
+        if (pos < len) info->players = data[pos++];
+        if (pos < len) info->max_players = data[pos++];
+        if (pos < len) info->bots = data[pos++];
+        if (pos < len) info->is_dedicated = (data[pos++] == 'd');
+        if (pos < len) pos++; // environment
+        if (pos < len) info->password = (data[pos++] != 0);
+        if (pos < len) info->secure = (data[pos++] != 0);
     }
     return true;
 }
@@ -133,6 +141,7 @@ bool a2s_get_server_info(const uint32_t ip, const uint16_t port, a2s_server_info
         return false;
     }
 
+    // A2S Challenge Kontrolü
     if (recv_buf[4] == 0x41 && recv_len >= 9) {
         uint8_t challenge_pkt[29];
         memcpy(challenge_pkt, A2S_INFO_REQUEST, 25);
