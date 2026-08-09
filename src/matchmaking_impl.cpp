@@ -11,13 +11,35 @@
 #include "server_cache.h"
 #include "utils.h"
 
-// GÜVENLİK 2: A2S_INFO paket boyutu ve verisi sabitlenerek Buffer Overflow çökmesi engellendi.
 static const uint8_t A2S_INFO_REQ_BYTES[] = { 
     0xFF, 0xFF, 0xFF, 0xFF, 0x54, 0x53, 0x6F, 0x75, 0x72, 0x63, 0x65, 0x20, 
     0x45, 0x6E, 0x67, 0x69, 0x6E, 0x65, 0x20, 0x51, 0x75, 0x65, 0x72, 0x79, 0x00 
 };
 
 extern void RealMasterLog(const char *fmt, ...);
+
+// --- DEBUG SİSTEMİ ---
+// UI ve Motor spam loglarını görmek istiyorsanız true kalsın. Kapatmak için false yapın.
+bool g_bVerboseDebug = true; 
+
+static void VerboseLog(const char* fmt, ...) 
+{
+    if (!g_bVerboseDebug) return;
+
+    char buffer[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+
+    // Hem DebugView (Canlı izleme) aracına hem de normal loga gönder
+    OutputDebugStringA("[CRealMasterMatchmaking] ");
+    OutputDebugStringA(buffer);
+    OutputDebugStringA("\n");
+    
+    RealMasterLog("[VERBOSE] %s", buffer);
+}
+// ---------------------
 
 static CRealMasterMatchmaking g_RealMaster;
 static master_list_t g_MasterList;
@@ -68,10 +90,13 @@ CRealMasterMatchmaking::CRealMasterMatchmaking()
     m_pRealSteam = NULL;
     memset(m_servers, 0, sizeof(m_servers));
     memset(m_dispatched, 0, sizeof(m_dispatched));
+    
+    VerboseLog("CRealMasterMatchmaking initialized.");
 }
 
 CRealMasterMatchmaking::~CRealMasterMatchmaking()
 {
+    VerboseLog("CRealMasterMatchmaking destroyed.");
     if (m_hThread)
     {
         m_cancelRequested = true;
@@ -98,9 +123,9 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
     };
 
     RealMasterLog("QueryThread started [ID: %u]", myReqId);
+    VerboseLog("Thread %u running...", myReqId);
 
     load_master_list();
-    RealMasterLog("Master list: %d servers configured", g_MasterList.count);
 
     master_query_result_t master_result;
     memset(&master_result, 0, sizeof(master_result));
@@ -108,11 +133,11 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
     for (int m = 0; m < g_MasterList.count && is_active(); m++)
     {
-        RealMasterLog("Querying master %s ...", g_MasterList.entries[m].addr);
+        VerboseLog("Requesting servers from master %s", g_MasterList.entries[m].addr);
         master_query_result_t result;
         if (master_query_servers(g_MasterList.entries[m].addr, &result))
         {
-            RealMasterLog("  Got %d servers from %s", result.count, g_MasterList.entries[m].addr);
+            VerboseLog("Received %d server IPs from Master Server", result.count);
             for (int i = 0; i < result.count && total < MAX_GAME_SERVERS; i++)
             {
                 master_result.servers[total] = result.servers[i];
@@ -122,11 +147,13 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         }
     }
 
-    if (!is_active()) { delete data; return 0; }
+    if (!is_active()) { 
+        VerboseLog("Thread %u killed before reading cache.", myReqId); 
+        delete data; return 0; 
+    }
 
     if (total == 0)
     {
-        RealMasterLog("No servers from masters, trying cache");
         char cache_path[512];
         snprintf(cache_path, sizeof(cache_path), "%s\\cache\\servers.dat", g_PluginDir);
         server_cache_t cache;
@@ -138,7 +165,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 master_result.servers[i].port = cache.servers[i].port;
             }
             total = cache.count;
-            RealMasterLog("Loaded %d servers from cache", total);
+            VerboseLog("Loaded %d servers from fallback cache.", total);
         }
     }
     else
@@ -169,7 +196,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
     }
     *data->serverCount = total;
 
-    RealMasterLog("Pre-initialized %d server entries, starting A2S queries", total);
+    VerboseLog("A2S Queries starting for %d servers...", total);
 
     const int WINDOW = 64;
     const int PER_SERVER_TIMEOUT = 2000;
@@ -200,8 +227,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         dest.sin_port = master_result.servers[idx].port;
 
         sendTimes[idx] = GetTickCount();
-        
-        // Sabit, güvenilir A2S_INFO byte dizisini kullanıyoruz
         sendto(socks[idx], (const char *)A2S_INFO_REQ_BYTES, sizeof(A2S_INFO_REQ_BYTES), 0,
             (struct sockaddr *)&dest, sizeof(dest));
         activeCount++;
@@ -248,7 +273,10 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                 int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
                     (struct sockaddr *)&from, &fromlen);
 
-                if (!is_active()) break;
+                if (!is_active()) {
+                    VerboseLog("Thread %u aborted during socket read.", myReqId);
+                    break;
+                }
 
                 DWORD elapsed = GetTickCount() - sendTimes[i];
                 gameserveritem_t *gs = &data->servers[i];
@@ -269,7 +297,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
                     sendTimes[i] = GetTickCount(); 
                     sendto(socks[i], (const char *)req_challenge, (int)(sizeof(A2S_INFO_REQ_BYTES) + 4), 0, (struct sockaddr *)&dest, sizeof(dest));
-
+                    
                     sel--;
                     continue; 
                 }
@@ -295,11 +323,14 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
                     gs->m_bPassword = info.password != 0;
                     gs->m_bSecure = info.secure != 0;
                     
-                    // GÜVENLİK 3: İşlemci optimizasyonunun flag'i önce okumasını engelleyen bariyer.
                     MemoryBarrier(); 
-                    
                     gs->m_bHadSuccessfulResponse = true;
                     responded++;
+                    
+                    // Her 10 sunucuda bir konsolu spamlama amacıyla log sınırlandı
+                    if (responded % 10 == 0) {
+                        VerboseLog("Parsed A2S_INFO for 10 more servers. Total so far: %d", responded);
+                    }
                 }
 
                 closesocket(socks[i]);
@@ -342,7 +373,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
             closesocket(socks[i]);
     }
 
-    RealMasterLog("QueryThread finished: %d total, %d responded, %d processed", total, responded, finished);
+    VerboseLog("QueryThread [ID: %u] exiting naturally. Processed: %d, Responded: %d", myReqId, finished, responded);
     
     if (is_active()) {
         self->m_queryDone = true;
@@ -356,18 +387,18 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
     uint32_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32_t nFilters,
     ISteamMatchmakingServerListResponse *pResponse)
 {
-    RealMasterLog("RequestInternetServerList(appID=%u, nFilters=%u, pResponse=%p)", iApp, nFilters, pResponse);
-
     m_requestCounter++; 
     m_cancelRequested = true;
+
+    VerboseLog("UI Called RequestInternetServerList | New ID: %u", m_requestCounter);
 
     if (m_hThread)
     {
         if (IsThreadAlive(m_hThread))
         {
-            // GÜVENLİK 1 (EN KRİTİK): Eski iş parçacığının tamamen ölmesini bekliyoruz. 
-            // Aksi halde alttaki memset() fonksiyonu ile çalışan eski thread çarpışarak anında oyunu çökertir.
+            VerboseLog("Waiting for previous Thread to safely close...");
             WaitForSingleObject(m_hThread, INFINITE);
+            VerboseLog("Previous thread closed safely.");
         }
         CloseHandle(m_hThread); 
         m_hThread = NULL;
@@ -379,8 +410,6 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
     m_cancelRequested = false;
     m_lastDispatchedIdx = 0;
     memset(m_dispatched, 0, sizeof(m_dispatched));
-    
-    // Eski thread öldüğü için artık gönül rahatlığı ile sıfırlanabilir.
     memset(m_servers, 0, sizeof(m_servers)); 
     m_pResponse = pResponse;
 
@@ -391,7 +420,7 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
     data->reqId = m_requestCounter;
 
     m_hThread = CreateThread(NULL, 0, QueryThread, data, 0, NULL);
-
+    
     return (HServerListRequest)(uintptr_t)m_requestCounter;
 }
 
@@ -421,9 +450,7 @@ HServerListRequest CRealMasterMatchmaking::RequestHistoryServerList(uint32_t iAp
 
 HServerListRequest CRealMasterMatchmaking::RequestSpectatorServerList(uint32_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32_t nFilters, ISteamMatchmakingServerListResponse *pResponse)
 {
-    RealMasterLog("RequestSpectatorServerList called (returning NULL)");
-    if (pResponse)
-        pResponse->RefreshComplete(NULL, eNoServersListedOnMasterServer);
+    if (pResponse) pResponse->RefreshComplete(NULL, eNoServersListedOnMasterServer);
     return NULL;
 }
 
@@ -436,11 +463,10 @@ void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        RealMasterLog("ReleaseRequest called");
+        VerboseLog("UI Called ReleaseRequest for ID: %u", (uint32_t)(uintptr_t)hRequest);
         m_cancelRequested = true;
         m_refreshing = false;
         
-        // Pencere kapatıldığında oluşabilecek bellek çakışmaları engellenmiştir.
         if (m_hThread)
         {
             if (IsThreadAlive(m_hThread)) {
@@ -459,7 +485,11 @@ gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hR
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        if (iServer < 0 || iServer >= m_serverCount) return NULL;
+        // Spams too much if enabled for every tick, we log mostly out-of-bounds attempts
+        if (iServer < 0 || iServer >= m_serverCount) {
+            VerboseLog("WARNING: UI tried to access invalid Server Index %d (Max: %d)", iServer, m_serverCount);
+            return NULL;
+        }
         return &m_servers[iServer];
     }
     if (m_pRealSteam) return m_pRealSteam->GetServerDetails(hRequest, iServer);
@@ -470,7 +500,7 @@ void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        RealMasterLog("CancelQuery called");
+        VerboseLog("UI Called CancelQuery for ID: %u", m_requestCounter);
         m_cancelRequested = true;
         
         if (m_hThread && IsThreadAlive(m_hThread)) {
@@ -480,7 +510,6 @@ void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
         if (m_pResponse)
         {
             m_pResponse->RefreshComplete(hRequest, eNoServersListedOnMasterServer);
-            RealMasterLog("Dispatched RefreshComplete after cancel");
         }
         m_refreshing = false;
         return;
@@ -528,13 +557,18 @@ void CRealMasterMatchmaking::DispatchCallbacks()
             m_lastDispatchedIdx++;
         }
     }
+    
+    if (dispatched > 0) {
+        VerboseLog("Engine requested dispatch: Handed %d servers to UI. (Total Dispatched: %d)", dispatched, m_lastDispatchedIdx);
+    }
 
     if (m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
     {
         int responded = 0;
         for (int i = 0; i < m_serverCount; i++)
             if (m_servers[i].m_bHadSuccessfulResponse) responded++;
-        RealMasterLog("Dispatching RefreshComplete (%d total, %d responded)", m_serverCount, responded);
+            
+        VerboseLog("Query Done & UI List is Full. Dispatched RefreshComplete.");
         EMatchMakingServerResponse resp = (m_serverCount > 0) ?
             eServerResponded : eNoServersListedOnMasterServer;
         m_pResponse->RefreshComplete(hReq, resp);
@@ -575,6 +609,8 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
         return;
     }
     if (iServer < 0 || iServer >= m_serverCount) return;
+    
+    VerboseLog("UI Requested Refresh for Server Index: %d", iServer);
 
     gameserveritem_t *gs = &m_servers[iServer];
     uint32_t ip_net = htonl(gs->m_NetAdr.GetIP());
@@ -596,7 +632,7 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
         gs->m_bPassword = info.password != 0;
         gs->m_bSecure = info.secure != 0;
         
-        MemoryBarrier(); // Refresh atarken çökmemesi için eklendi.
+        MemoryBarrier();
         gs->m_bHadSuccessfulResponse = true;
     }
 }
