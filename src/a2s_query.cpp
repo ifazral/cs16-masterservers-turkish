@@ -6,12 +6,11 @@
 #include <stdbool.h>
 #include <string.h>
 #include "a2s_query.h"
-// OyunYöneticisi ve ReHLDS uyumlu A2S_INFO istek paketi
+// Saf ve standart A2S_INFO İstek Paketi (Oyun sunucuları için)
 const uint8_t A2S_INFO_REQUEST[] = {
     0xFF, 0xFF, 0xFF, 0xFF,
     0x54,
-    'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00,
-    '\\', 'g', 'a', 'm', 'e', 'd', 'i', 'r', '\\', 'c', 's', 't', 'r', 'i', 'k', 'e', 0x00
+    'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00
 };
 const size_t A2S_INFO_REQUEST_LEN = sizeof(A2S_INFO_REQUEST);
 
