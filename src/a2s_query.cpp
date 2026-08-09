@@ -7,10 +7,12 @@
 #include <string.h>
 #include "a2s_query.h"
 
+// OyunYöneticisi ve ReHLDS uyumlu A2S_INFO istek paketi
 static const uint8_t A2S_INFO_REQUEST[] = {
     0xFF, 0xFF, 0xFF, 0xFF,
     0x54,
-    'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00
+    'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00,
+    '\\', 'g', 'a', 'm', 'e', 'd', 'i', 'r', '\\', 'c', 's', 't', 'r', 'i', 'k', 'e', 0x00
 };
 
 static const char *read_string(const uint8_t *data, int len, int *pos, char *out, int out_size)
@@ -36,8 +38,6 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
     if (data[4] != 0x49) return false;
 
     int pos = 5;
-
-    // Protocol baytını atla (Struct içerisinde tanımlı olmadığı için atama yapılmıyor)
     uint8_t protocol = data[pos++];
 
     read_string(data, len, &pos, out->name, sizeof(out->name));
@@ -61,7 +61,6 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 
     read_string(data, len, &pos, out->version, sizeof(out->version));
 
-    // EDF (Extra Data Flags) kontrolü
     if (pos < len)
     {
         uint8_t edf = data[pos++];
@@ -98,7 +97,7 @@ bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out
     dest.sin_addr.s_addr = ip_net;
     dest.sin_port = port_net;
 
-    uint8_t req_buf[32];
+    uint8_t req_buf[64];
     size_t req_len = sizeof(A2S_INFO_REQUEST);
     memcpy(req_buf, A2S_INFO_REQUEST, req_len);
 
@@ -143,7 +142,6 @@ bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out
             return false;
         }
 
-        // Challenge ('A' / 0x41) yanıtı geldiyse
         if (buf[0] == 0xFF && buf[1] == 0xFF && buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41)
         {
             if (recv_len >= 9)
@@ -255,7 +253,7 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
                     buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41 && !challenged[i])
                 {
                     challenged[i] = true;
-                    uint8_t req_buf[32];
+                    uint8_t req_buf[64];
                     memcpy(req_buf, A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST));
                     memcpy(req_buf + sizeof(A2S_INFO_REQUEST), buf + 5, 4);
 
@@ -265,7 +263,7 @@ int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
                     dest.sin_addr.s_addr = ips[idx];
                     dest.sin_port = ports[idx];
 
-                    sendto(socks[i], (const char *)req_buf, sizeof(A2S_INFO_REQUEST) + 4, 0,
+                    sendto(socks[i], (const char *)req_challenge, sizeof(A2S_INFO_REQUEST) + 4, 0,
                            (struct sockaddr *)&dest, sizeof(dest));
                     continue;
                 }
