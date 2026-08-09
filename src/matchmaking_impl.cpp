@@ -40,7 +40,6 @@ static void VerboseLog(const char* fmt, ...)
 static CRealMasterMatchmaking g_RealMaster;
 static master_list_t g_MasterList;
 bool g_MasterListLoaded = false;
-static int g_publishedServerCount = 0; // OYUN ÇÖKMESİNİ ENGELLEYEN YENİ GÜVENLİK SAYACI
 
 struct QueryThreadData
 {
@@ -174,7 +173,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
     if (!is_active()) { delete data; return 0; }
 
-    // ÇOK ÖNEMLİ: m_serverCount güncellenmeden ÖNCE tüm array sıfırlanıp hazır edilmeli.
     for (int i = 0; i < total; i++)
     {
         gameserveritem_t *gs = &data->servers[i];
@@ -185,7 +183,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
         gs->m_bHadSuccessfulResponse = false;
     }
     
-    MemoryBarrier(); // Array'in arayüze hazır olduğundan emin ol
+    MemoryBarrier(); 
     *data->serverCount = total;
 
     const int WINDOW = 64;
@@ -381,7 +379,6 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
     }
 
     m_serverCount = 0;
-    g_publishedServerCount = 0; // Yeni aramada güvenlik sayacını sıfırla
     m_refreshing = true;
     m_queryDone = false;
     m_cancelRequested = false;
@@ -459,27 +456,23 @@ void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
 
 gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hRequest, int iServer)
 {
-    if (iServer < 0 || iServer >= MAX_GAME_SERVERS) 
-    {
-        return &m_servers[0];
-    }
-
+    // ÇÖZÜM: Steam API spesifikasyonuna göre sınır dışı (out of bounds) durumlarda
+    // KESİNLİKLE NULL DÖNÜLMELİDİR. &m_servers[0] döndürmek UI ağacını bozar (corrupts CUtlRBTree)!
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        if (iServer >= m_serverCount)
+        if (iServer < 0 || iServer >= m_serverCount)
         {
-            return &m_servers[0]; 
+            return NULL; 
         }
         return &m_servers[iServer];
     }
 
     if (m_pRealSteam) 
     {
-        gameserveritem_t *pRealServer = m_pRealSteam->GetServerDetails(hRequest, iServer);
-        if (pRealServer != NULL) return pRealServer;
+        return m_pRealSteam->GetServerDetails(hRequest, iServer);
     }
 
-    return &m_servers[0];
+    return NULL;
 }
 
 void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
@@ -521,11 +514,7 @@ void CRealMasterMatchmaking::DispatchCallbacks()
     }
 
     HServerListRequest hReq = (HServerListRequest)(uintptr_t)m_requestCounter;
-    
-    // YENİ GÜVENLİK (NULL POINTER ÇÖZÜMÜ):
-    // Asla arayüzün bilmediği bir indeks (m_serverCount'un ilerisi veya ui'nin haberdar olmadığı kısım)
-    // için callback tetiklemiyoruz!
-    int current = g_publishedServerCount; 
+    int current = m_serverCount; 
 
     int dispatched = 0;
     int maxPerFrame = 20;
@@ -547,7 +536,7 @@ void CRealMasterMatchmaking::DispatchCallbacks()
         {
             m_dispatched[i] = true;
             m_lastDispatchedIdx++;
-            dispatched++; // Bunu arttırmak frame gecikmelerini önler
+            dispatched++; // Gecikmeleri önlemek için artırıyoruz
             
             m_pResponse->ServerFailedToRespond(hReq, i);
             
@@ -576,7 +565,7 @@ bool CRealMasterMatchmaking::IsRefreshing(HServerListRequest hRequest)
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        DispatchCallbacks(); // Callbackler artık SADECE burada çalışır, güvenlidir.
+        DispatchCallbacks();
         return m_refreshing || IsThreadAlive(m_hThread);
     }
     if (m_pRealSteam) return m_pRealSteam->IsRefreshing(hRequest);
@@ -587,10 +576,6 @@ int CRealMasterMatchmaking::GetServerCount(HServerListRequest hRequest)
 {
     if (IsOurRequest(hRequest, m_requestCounter))
     {
-        // ÖNEMLİ ÇÖZÜM: GetServerCount içinden DispatchCallbacks() TAMAMEN KALDIRILDI.
-        // Motor tam bu fonksiyondan değer okumaya çalışırken, alttan arayüze veri göndermek motoru çökertebiliyordu.
-        // Arayüz listeyi büyütecek değerimizi sorunsuzca alır ve biz bunu g_publishedServerCount olarak not ederiz.
-        g_publishedServerCount = m_serverCount; 
         return m_serverCount; 
     }
     if (m_pRealSteam) return m_pRealSteam->GetServerCount(hRequest);
