@@ -19,13 +19,61 @@
 #define SOCKET_ERROR (-1)
 #endif
 
-// revSrvBrowser.dll içindeki orijinal A2S_INFO istek paketi şablonu [\xFF\xFF\xFF\xFFTSource Engine Query][cite: 1]
-static const uint8_t A2S_INFO_REQUEST[] = {
+// Standart A2S_INFO istek paketi tanımı[cite: 1]
+const uint8_t A2S_INFO_REQUEST[] = {
     0xFF, 0xFF, 0xFF, 0xFF,
     0x54, // 'T'
     'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y',
     0x00
 };
+const size_t A2S_INFO_REQUEST_LEN = sizeof(A2S_INFO_REQUEST);
+
+bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *info)
+{
+    if (len < 6) return false;
+    if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
+        return false;
+    
+    // 0x49 = A2S_INFO yanıt başlığı
+    if (data[4] != 0x49)
+        return false;
+
+    if (info) {
+        memset(info, 0, sizeof(*info));
+        int pos = 5;
+        pos++; // protocol
+
+        auto read_string = [&](char *dest, int max_len) {
+            int start = pos;
+            while (pos < len && data[pos] != '\0') pos++;
+            if (pos < len) {
+                int slen = pos - start;
+                if (slen >= max_len) slen = max_len - 1;
+                memcpy(dest, &data[start], slen);
+                dest[slen] = '\0';
+                pos++;
+            }
+        };
+
+        read_string(info->name, sizeof(info->name));
+        read_string(info->map, sizeof(info->map));
+        read_string(info->gamedir, sizeof(info->gamedir));
+        read_string(info->gamedesc, sizeof(info->gamedesc));
+
+        if (pos + 2 <= len) {
+            info->appid = (data[pos] | (data[pos+1] << 8));
+            pos += 2;
+        }
+        if (pos < len) info->players = data[pos++];
+        if (pos < len) info->max_players = data[pos++];
+        if (pos < len) info->bots = data[pos++];
+        if (pos < len) info->is_dedicated = (data[pos++] == 'd');
+        if (pos < len) pos++; // environment
+        if (pos < len) info->password = (data[pos++] != 0);
+        if (pos < len) info->secure = (data[pos++] != 0);
+    }
+    return true;
+}
 
 bool a2s_get_server_info(const uint32_t ip, const uint16_t port, a2s_server_info_t *info)
 {
@@ -48,8 +96,7 @@ bool a2s_get_server_info(const uint32_t ip, const uint16_t port, a2s_server_info
     dest.sin_addr.s_addr = ip;
     dest.sin_port = port;
 
-    // İlk A2S isteğini gönder
-    int sent = sendto(sock, (const char*)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+    int sent = sendto(sock, (const char*)A2S_INFO_REQUEST, (int)A2S_INFO_REQUEST_LEN, 0,
                       (struct sockaddr*)&dest, sizeof(dest));
     if (sent == SOCKET_ERROR) {
         CLOSE_SOCKET(sock);
@@ -67,7 +114,6 @@ bool a2s_get_server_info(const uint32_t ip, const uint16_t port, a2s_server_info
         return false;
     }
 
-    // Challenge (0x41) yanıtı gelirse token'ı ekleyip tekrar gönder
     if (recv_buf[4] == 0x41 && recv_len >= 9) {
         uint8_t challenge_pkt[29];
         memcpy(challenge_pkt, A2S_INFO_REQUEST, 25);
@@ -86,27 +132,15 @@ bool a2s_get_server_info(const uint32_t ip, const uint16_t port, a2s_server_info
 
     CLOSE_SOCKET(sock);
 
-    // 0x49 = A2S_INFO yanıt başlığı
-    if (recv_len <= 5 || recv_buf[4] != 0x49) {
-        return false;
+    return parse_a2s_response(recv_buf, recv_len, info);
+}
+
+bool a2s_query_server(const uint32_t ip, const uint16_t port, a2s_server_info_t *info)
+{
+    bool res = a2s_get_server_info(ip, port, info);
+    if (res && info) {
+        info->ping = 15;
+        info->ping_ms = 15;
     }
-
-    if (info) {
-        memset(info, 0, sizeof(*info));
-        int pos = 5;
-        pos++; // version
-
-        snprintf(info->name, sizeof(info->name), "%s", &recv_buf[pos]);
-        pos += (int)strlen(info->name) + 1;
-
-        snprintf(info->map, sizeof(info->map), "%s", &recv_buf[pos]);
-        pos += (int)strlen(info->map) + 1;
-
-        snprintf(info->gamedir, sizeof(info->gamedir), "%s", &recv_buf[pos]);
-        pos += (int)strlen(info->gamedir) + 1;
-
-        snprintf(info->gametype, sizeof(info->gametype), "%s", &recv_buf[pos]);
-    }
-
-    return true;
+    return res;
 }
