@@ -454,8 +454,9 @@ void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
 
 gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hRequest, int iServer)
 {
-    // KESİN ÇÖZÜM: Motorun asla NULL (0x0) pointer alıp "movl (%eax), %edx" hatasıyla
-    // çökmemesi için geçersiz isteklerde veya indeks hatalarında KESİNLİKLE m_servers[0] döndürüyoruz.
+    // KESİN ÇÖZÜM: Motor liste boşken (m_serverCount = 0) veya indeks aralığı dışındayken 
+    // asla NULL dönmüyoruz. Güvenli bir bellek adresi (&m_servers[0]) dönerek 
+    // "movl (%eax), %edx" Null Pointer çökmesini tamamen engelliyoruz.
     if (iServer < 0 || iServer >= MAX_GAME_SERVERS) 
     {
         return &m_servers[0];
@@ -463,6 +464,10 @@ gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hR
 
     if (IsOurRequest(hRequest, m_requestCounter))
     {
+        if (iServer >= m_serverCount)
+        {
+            return &m_servers[0]; // Liste henüz dolmadıysa geçici olarak güvenli adres ver
+        }
         return &m_servers[iServer];
     }
 
