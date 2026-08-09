@@ -35,7 +35,7 @@ static char g_heartbeatMaster[256] = {0};
 static int g_fastdlPort = FASTDL_DEFAULT_PORT;
 static uint8_t *g_pServerNetadr = NULL;
 
-// YENİ EKLENEN ASENKRON IP DEĞİŞKENLERİ:
+// ASENKRON IP ARAMA DEĞİŞKENLERİ
 static char g_asyncPublicIP[64] = {0};
 static volatile bool g_asyncIpReady = false;
 static volatile bool g_asyncIpFetching = false;
@@ -702,7 +702,7 @@ static void InitEngineHook()
                                 RealMasterLog("Engine hook: server netadr at %p", g_pServerNetadr);
                         }
                         
-                        /* [FIX] Assembly boyut uyuşmazlığı hatası iptal edildi */
+                        /* [FIX] Z_Free hatasına sebep olmamak için Assembly yaması iptal edildi */
                         nopCount++;
                     }
                     searchFrom = ipPushRef + 5;
@@ -782,17 +782,16 @@ static void EnsureRealSteamApi()
         pfn_##name = (GenericSteamFunc_t)GetProcAddress(g_hRealSteamApi, #name);
 
 
-// YENİ EKLENDİ: SADECE IP ARAMASINI ARKA PLANDA YAPAN THREAD (DONMAYI ENGELLER)
+// DONMAYI ÖNLEMEK İÇİN ASENKRON IP ARAMA THREADİ
 static DWORD WINAPI FetchIPThread(LPVOID param)
 {
     if (!FastDL_GetPublicIP(g_asyncPublicIP, sizeof(g_asyncPublicIP), g_heartbeatMaster))
     {
-        g_asyncPublicIP[0] = '\0'; // Başarısız olursa boş bırak (Zaman aşımı olursa burada biter)
+        g_asyncPublicIP[0] = '\0'; // Başarısız olursa boş bırak
     }
     g_asyncIpReady = true; // IP bulma işlemi bitti bayrağı
     return 0;
 }
-
 
 extern "C" __declspec(dllexport) ISteamMatchmakingServers * __cdecl SteamMatchmakingServers()
 {
@@ -861,7 +860,12 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
                 if (svlan && svlan->value != 0.0f)
                 {
                     svlan->value = 0.0f;
-                    svlan->string = (char *)"0";
+                    // DÜZELTME 1: Z_Free hatasını engellemek için pointer değiştirmiyoruz, içeriği değiştiriyoruz.
+                    if (svlan->string && strlen(svlan->string) >= 1)
+                    {
+                        svlan->string[0] = '0';
+                        svlan->string[1] = '\0';
+                    }
                     RealMasterLog("Auto-set sv_lan 0 (master server configured)");
                 }
             }
@@ -891,14 +895,13 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
             {
                 RealMasterLog("FastDL: sv_downloadurl already set to '%s', skipping", cvUrl->string);
                 skipFastdl = true;
-                g_fastdlStarted = true; // Zaten atanmış, atla
+                g_fastdlStarted = true;
             }
 
             if (!skipFastdl)
             {
                 if (!g_asyncIpFetching) 
                 {
-                    // 1. ADIM: Oyunu dondurmamak için IP bulma işini arka planda başlat
                     g_asyncIpFetching = true;
                     g_asyncIpReady = false;
                     HANDLE hThread = CreateThread(NULL, 0, FetchIPThread, NULL, 0, NULL);
@@ -906,7 +909,6 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
                 }
                 else if (g_asyncIpReady) 
                 {
-                    // 2. ADIM: Arka plandaki IP bulma işi bitti. Artık oyunu çökertmeden Engine'i (CVar'ları) Main Thread'de güvenle değiştirebiliriz.
                     g_fastdlStarted = true;
 
                     char cfgGameDir[64] = "cstrike";
@@ -919,7 +921,6 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
                             strncpy(cfgGameDir, g_pGameDir, sizeof(cfgGameDir) - 1);
                     }
 
-                    // Eğer zaman aşımı (Timeout 10060) yüzünden IP bulamadıysa, fallback kullan.
                     if (g_asyncPublicIP[0] == '\0') 
                     {
                         const char *fallback = GetCvarString("ip");
@@ -947,8 +948,17 @@ extern "C" __declspec(dllexport) void * __cdecl SteamAPI_RunCallbacks()
                         {
                             static char downloadUrl[256];
                             snprintf(downloadUrl, sizeof(downloadUrl), "http://%s:%d", g_asyncPublicIP, g_fastdlPort);
-                            cvUrl->string = downloadUrl;
-                            RealMasterLog("FastDL: set sv_downloadurl = %s", downloadUrl);
+                            
+                            // DÜZELTME 2: Z_Free hatasını engellemek için pointer değiştirmek yerine veriyi güvenle kopyalıyoruz.
+                            if (cvUrl->string && strlen(cvUrl->string) >= strlen(downloadUrl))
+                            {
+                                strcpy(cvUrl->string, downloadUrl);
+                                RealMasterLog("FastDL: set sv_downloadurl = %s", downloadUrl);
+                            }
+                            else
+                            {
+                                RealMasterLog("FastDL: Engine buffer too small for auto-set. Please manually add 'sv_downloadurl \"%s\"' to your server.cfg", downloadUrl);
+                            }
                         }
                     }
                 }
