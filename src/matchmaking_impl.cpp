@@ -526,22 +526,33 @@ void CRealMasterMatchmaking::DispatchCallbacks()
     for (int i = 0; i < current && dispatched < maxPerFrame; i++)
     {
         if (m_dispatched[i]) continue;
+        
         if (m_servers[i].m_bHadSuccessfulResponse)
         {
-            m_pResponse->ServerResponded(hReq, i);
+            // ÖNEMLİ DÜZELTME 1: Durumu callback çağırmadan ÖNCE güncelliyoruz.
             m_dispatched[i] = true;
             m_lastDispatchedIdx++;
             dispatched++;
+            
+            m_pResponse->ServerResponded(hReq, i);
+            
+            // Oyun motoru ServerResponded esnasında ReleaseRequest çağırmışsa işlemi sonlandırıyoruz (Null Pointer Engeli)
+            if (!m_pResponse) break; 
         }
         else if (m_queryDone)
         {
-            m_pResponse->ServerFailedToRespond(hReq, i);
+            // Durumu callback çağırmadan ÖNCE güncelliyoruz.
             m_dispatched[i] = true;
             m_lastDispatchedIdx++;
+            
+            m_pResponse->ServerFailedToRespond(hReq, i);
+            
+            if (!m_pResponse) break;
         }
     }
 
-    if (m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
+    // m_pResponse halen geçerli mi diye tekrar kontrol ediyoruz
+    if (m_pResponse && m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
     {
         int responded = 0;
         for (int i = 0; i < m_serverCount; i++)
@@ -549,6 +560,7 @@ void CRealMasterMatchmaking::DispatchCallbacks()
             
         EMatchMakingServerResponse resp = (m_serverCount > 0) ?
             eServerResponded : eNoServersListedOnMasterServer;
+        
         m_pResponse->RefreshComplete(hReq, resp);
         m_refreshing = false;
         m_queryDone = false;
@@ -573,7 +585,8 @@ int CRealMasterMatchmaking::GetServerCount(HServerListRequest hRequest)
     if (IsOurRequest(hRequest, m_requestCounter))
     {
         DispatchCallbacks();
-        return m_lastDispatchedIdx;
+        // ÖNEMLİ DÜZELTME 2: m_lastDispatchedIdx yerine toplam sunucu sayısını(m_serverCount) döndürüyoruz.
+        return m_serverCount; 
     }
     if (m_pRealSteam) return m_pRealSteam->GetServerCount(hRequest);
     return 0;
