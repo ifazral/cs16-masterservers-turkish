@@ -2,6 +2,7 @@
 #define A2S_QUERY_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #pragma pack(push, 1)
 struct a2s_server_info_t
@@ -27,6 +28,8 @@ struct a2s_server_info_t
 #pragma pack(pop)
 
 extern const uint8_t A2S_INFO_REQUEST[25];
+const size_t A2S_INFO_REQUEST_LEN = sizeof(A2S_INFO_REQUEST);
+
 bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out);
 bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out, int timeout_ms = 2000);
 
