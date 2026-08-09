@@ -6,7 +6,6 @@
 #include <stdbool.h>
 #include <string.h>
 #include "a2s_query.h"
-
 // OyunYöneticisi ve ReHLDS uyumlu A2S_INFO istek paketi
 const uint8_t A2S_INFO_REQUEST[] = {
     0xFF, 0xFF, 0xFF, 0xFF,
@@ -14,6 +13,7 @@ const uint8_t A2S_INFO_REQUEST[] = {
     'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00,
     '\\', 'g', 'a', 'm', 'e', 'd', 'i', 'r', '\\', 'c', 's', 't', 'r', 'i', 'k', 'e', 0x00
 };
+const size_t A2S_INFO_REQUEST_LEN = sizeof(A2S_INFO_REQUEST);
 
 static const char *read_string(const uint8_t *data, int len, int *pos, char *out, int out_size)
 {
