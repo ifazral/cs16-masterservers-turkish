@@ -182,7 +182,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 		dest.sin_port = master_result.servers[idx].port;
 
 		sendTimes[idx] = GetTickCount();
-		sendto(socks[idx], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+		sendto(socks[idx], (const char *)A2S_INFO_REQUEST, A2S_INFO_REQUEST_LEN, 0,
 			(struct sockaddr *)&dest, sizeof(dest));
 		activeCount++;
 	};
