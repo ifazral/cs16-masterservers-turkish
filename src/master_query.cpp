@@ -1,591 +1,317 @@
-#define FD_SETSIZE 256
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
 #include <stdio.h>
 #include <string.h>
-#include "matchmaking_impl.h"
+#include <stdlib.h>
 #include "master_query.h"
-#include "a2s_query.h"
-#include "vdf_parser.h"
-#include "server_cache.h"
 #include "utils.h"
 
-extern void RealMasterLog(const char *fmt, ...);
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef int socklen_t;
+#define CLOSE_SOCKET closesocket
+#else
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <errno.h>
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR (-1)
+#define CLOSE_SOCKET close
+#endif
 
-static CRealMasterMatchmaking g_RealMaster;
-static master_list_t g_MasterList;
-bool g_MasterListLoaded = false;
-
-struct QueryThreadData
+static bool build_query_packet(uint8_t *buf, int *len, int max_len,
+    uint8_t region, const char *last_addr, const char *filter)
 {
-    CRealMasterMatchmaking *self;
-    gameserveritem_t *servers;
-    volatile int *serverCount;
-};
+    int pos = 0;
+    buf[pos++] = 0x31;
+    buf[pos++] = region;
 
-static void load_master_list()
+    int addr_len = (int)strlen(last_addr) + 1;
+    if (pos + addr_len > max_len) return false;
+    memcpy(buf + pos, last_addr, addr_len);
+    pos += addr_len;
+
+    int filt_len = (int)strlen(filter) + 1;
+    if (pos + filt_len > max_len) return false;
+    memcpy(buf + pos, filter, filt_len);
+    pos += filt_len;
+
+    *len = pos;
+    return true;
+}
+
+static bool parse_response(const uint8_t *data, int len, master_query_result_t *result,
+    uint32_t *last_ip, uint16_t *last_port)
 {
-    if (g_MasterListLoaded) return;
-    g_MasterListLoaded = true;
+    if (len < 6) return false;
 
-    find_plugin_dir();
+    if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
+        return false;
 
-    char vdf_path[512];
-    snprintf(vdf_path, sizeof(vdf_path), "%s\\platform\\config\\MasterServers.vdf", g_PluginDir);
+    if (data[4] != 0x66 || data[5] != 0x0A)
+        return false;
 
-    if (!vdf_parse_master_servers(vdf_path, &g_MasterList))
+    int pos = 6;
+    while (pos + 6 <= len && result->count < MAX_QUERY_SERVERS)
     {
-        snprintf(vdf_path, sizeof(vdf_path), "platform\\config\\MasterServers.vdf");
-        if (!vdf_parse_master_servers(vdf_path, &g_MasterList))
+        uint32_t ip = (data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3];
+        uint16_t port = (data[pos + 4] << 8) | data[pos + 5];
+        pos += 6;
+
+        if (ip == 0 && port == 0)
         {
-            strcpy(g_MasterList.entries[0].addr, "95.173.174.197:27010");
-            strcpy(g_MasterList.entries[1].addr, "95.173.174.198:27010");
-            strcpy(g_MasterList.entries[2].addr, "185.252.233.104:27010");
-            g_MasterList.count = 3;
-        }
-    }
-}
-
-CRealMasterMatchmaking::CRealMasterMatchmaking()
-{
-    m_serverCount = 0;
-    m_refreshing = false;
-    m_pResponse = NULL;
-    m_hThread = NULL;
-    m_requestCounter = 0;
-    m_queryDone = false;
-    m_cancelRequested = false;
-    m_lastDispatchedIdx = 0;
-    m_dispatching = false;
-    m_pRealSteam = NULL;
-    memset(m_servers, 0, sizeof(m_servers));
-    memset(m_dispatched, 0, sizeof(m_dispatched));
-}
-
-CRealMasterMatchmaking::~CRealMasterMatchmaking()
-{
-    if (m_hThread)
-    {
-        WaitForSingleObject(m_hThread, 10000);
-        CloseHandle(m_hThread);
-    }
-}
-
-static bool IsThreadAlive(HANDLE h)
-{
-    if (!h) return false;
-    DWORD code;
-    return GetExitCodeThread(h, &code) && code == STILL_ACTIVE;
-}
-
-DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
-{
-    QueryThreadData *data = (QueryThreadData *)param;
-
-    RealMasterLog("QueryThread started");
-
-    load_master_list();
-    RealMasterLog("Master list: %d servers configured", g_MasterList.count);
-
-    master_query_result_t master_result;
-    memset(&master_result, 0, sizeof(master_result));
-    int total = 0;
-
-    for (int m = 0; m < g_MasterList.count && !data->self->m_cancelRequested; m++)
-    {
-        RealMasterLog("Querying master %s ...", g_MasterList.entries[m].addr);
-        master_query_result_t result;
-        if (master_query_servers(g_MasterList.entries[m].addr, &result))
-        {
-            RealMasterLog("  Got %d servers from %s", result.count, g_MasterList.entries[m].addr);
-            for (int i = 0; i < result.count && total < MAX_GAME_SERVERS; i++)
-            {
-                master_result.servers[total] = result.servers[i];
-                total++;
-            }
             break;
         }
-        else
-        {
-            RealMasterLog("  FAILED to query %s, trying next...", g_MasterList.entries[m].addr);
-        }
+
+        uint32_t ip_net = htonl(ip);
+        uint16_t port_net = htons(port);
+
+        result->servers[result->count].ip = ip_net;
+        result->servers[result->count].port = port_net;
+        result->count++;
+
+        *last_ip = ip;
+        *last_port = port;
     }
 
-    RealMasterLog("Total servers from masters: %d", total);
+    return true;
+}
 
-    if (total == 0)
+bool master_query_servers(const char *master_addr, master_query_result_t *result)
+{
+    memset(result, 0, sizeof(*result));
+
+    char hostname[256];
+    unsigned short port = 0;
+    hostname[0] = 0;
+
+    if (sscanf(master_addr, "%255[-.0-9A-Za-z_]:%hu", hostname, &port) < 1)
     {
-        RealMasterLog("No servers from masters, trying cache");
-        char cache_path[512];
-        snprintf(cache_path, sizeof(cache_path), "%s\\cache\\servers.dat", g_PluginDir);
-        server_cache_t cache;
-        if (cache_load(cache_path, &cache))
-        {
-            for (int i = 0; i < cache.count && i < MAX_GAME_SERVERS; i++)
-            {
-                master_result.servers[i].ip = cache.servers[i].ip;
-                master_result.servers[i].port = cache.servers[i].port;
-            }
-            total = cache.count;
-            RealMasterLog("Loaded %d servers from cache", total);
-        }
+        return false;
     }
-    else
+
+    if (!port) port = PORT_MASTER;
+
+    uint32_t ip = host2ip(hostname);
+    if (ip == 0 || ip == (uint32_t)-1)
     {
-        char cache_path[512];
-        snprintf(cache_path, sizeof(cache_path), "%s\\cache\\servers.dat", g_PluginDir);
-        server_cache_t cache;
-        cache.count = 0;
-        for (int i = 0; i < total && cache.count < MAX_CACHED_SERVERS; i++)
-        {
-            cache.servers[cache.count].ip = master_result.servers[i].ip;
-            cache.servers[cache.count].port = master_result.servers[i].port;
-            cache.count++;
-        }
-        cache_save(cache_path, &cache);
+        return false;
     }
 
-    if (data->self->m_cancelRequested) { data->self->m_queryDone = true; delete data; return 0; }
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = ip;
+    dest.sin_port = htons(port);
 
-    for (int i = 0; i < total; i++)
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET)
+        return false;
+
+    char last_addr[32] = "0.0.0.0:0";
+    uint32_t last_ip = 0;
+    uint16_t last_port_val = 0;
+
+    // revSrvBrowser.dll içindeki orijinal filtre şablonu[cite: 1]
+    char filter[256];
+    snprintf(filter, sizeof(filter), "\\gamedir\\cstrike \\nap\\10 \\full\\1 \\empty\\1 \\secure\\1 \\proxy\\1");
+
+    int retries = 0;
+    bool done = false;
+
+    while (!done && retries < QUERY_MAX_RETRIES)
     {
-        gameserveritem_t *gs = &data->servers[i];
-        memset(gs, 0, sizeof(*gs));
-        gs->m_NetAdr.Init(ntohl(master_result.servers[i].ip),
-            ntohs(master_result.servers[i].port),
-            ntohs(master_result.servers[i].port));
-        gs->m_bHadSuccessfulResponse = false;
-    }
-    *data->serverCount = total;
+        uint8_t pkt[512];
+        int pkt_len = 0;
 
-    RealMasterLog("Pre-initialized %d server entries, starting A2S queries", total);
+        if (!build_query_packet(pkt, &pkt_len, sizeof(pkt), 0xFF, last_addr, filter))
+            break;
 
-    const int WINDOW = 64;
-    const int PER_SERVER_TIMEOUT = 2000;
-
-    SOCKET socks[MAX_GAME_SERVERS];
-    DWORD sendTimes[MAX_GAME_SERVERS];
-    bool challenged[MAX_GAME_SERVERS];
-
-    for (int i = 0; i < total; i++)
-    {
-        socks[i] = INVALID_SOCKET;
-        challenged[i] = false;
-    }
-
-    int nextToSend = 0;
-    int activeCount = 0;
-    int responded = 0;
-    int finished = 0;
-
-    auto sendQuery = [&](int idx) {
-        socks[idx] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (socks[idx] == INVALID_SOCKET) { finished++; return; }
-
-        struct sockaddr_in dest;
-        memset(&dest, 0, sizeof(dest));
-        dest.sin_family = AF_INET;
-        dest.sin_addr.s_addr = master_result.servers[idx].ip;
-        dest.sin_port = master_result.servers[idx].port;
-
-        sendTimes[idx] = GetTickCount();
-        sendto(socks[idx], (const char *)A2S_INFO_REQUEST, (int)A2S_INFO_REQUEST_LEN, 0,
+        int sr = sendto(sock, (const char *)pkt, pkt_len, 0,
             (struct sockaddr *)&dest, sizeof(dest));
-        activeCount++;
-    };
+        if (sr == SOCKET_ERROR)
+        {
+            break;
+        }
 
-    while (nextToSend < total && activeCount < WINDOW)
-    {
-        sendQuery(nextToSend);
-        nextToSend++;
-    }
-
-    while (activeCount > 0 && !data->self->m_cancelRequested)
-    {
         fd_set readfds;
         FD_ZERO(&readfds);
-        SOCKET max_sock = 0;
-        int fdCount = 0;
-
-        for (int i = 0; i < nextToSend && fdCount < FD_SETSIZE; i++)
-        {
-            if (socks[i] == INVALID_SOCKET) continue;
-            FD_SET(socks[i], &readfds);
-            if (socks[i] > max_sock) max_sock = socks[i];
-            fdCount++;
-        }
-        if (fdCount == 0) break;
+        FD_SET(sock, &readfds);
 
         struct timeval tv;
-        tv.tv_sec = 0;
-        tv.tv_usec = 50000;
+        tv.tv_sec = QUERY_TIMEOUT_MS / 1000;
+        tv.tv_usec = (QUERY_TIMEOUT_MS % 1000) * 1000;
 
-        int sel = select((int)max_sock + 1, &readfds, NULL, NULL, &tv);
-
-        if (sel > 0)
+        int sel = select((int)sock + 1, &readfds, NULL, NULL, &tv);
+        if (sel <= 0)
         {
-            for (int i = 0; i < nextToSend && sel > 0; i++)
-            {
-                if (socks[i] == INVALID_SOCKET) continue;
-                if (!FD_ISSET(socks[i], &readfds)) continue;
-
-                uint8_t buf[2048];
-                struct sockaddr_in from;
-                int fromlen = sizeof(from);
-                int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
-                    (struct sockaddr *)&from, &fromlen);
-
-                DWORD elapsed = GetTickCount() - sendTimes[i];
-                gameserveritem_t *gs = &data->servers[i];
-
-                // CHALLENGE (0x41) YANITI GELDİYSE TOKEN İLE YENİDEN İSTEK AT
-                if (recv_len >= 9 && buf[0] == 0xFF && buf[1] == 0xFF && 
-                    buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41 && !challenged[i])
-                {
-                    challenged[i] = true;
-                    uint8_t req_challenge[64];
-                    memcpy(req_challenge, A2S_INFO_REQUEST, A2S_INFO_REQUEST_LEN);
-                    memcpy(req_challenge + A2S_INFO_REQUEST_LEN, buf + 5, 4);
-
-                    struct sockaddr_in dest;
-                    memset(&dest, 0, sizeof(dest));
-                    dest.sin_family = AF_INET;
-                    dest.sin_addr.s_addr = master_result.servers[i].ip;
-                    dest.sin_port = master_result.servers[i].port;
-
-                    sendTimes[i] = GetTickCount(); // Zaman aşımını sıfırla
-                    sendto(socks[i], (const char *)req_challenge, (int)(A2S_INFO_REQUEST_LEN + 4), 0, (struct sockaddr *)&dest, sizeof(dest));
-
-                    sel--;
-                    continue; // Soketi kapatma, 0x49 yanıtını bekle!
-                }
-
-                a2s_server_info_t info;
-                memset(&info, 0, sizeof(info));
-                if (recv_len > 0 && parse_a2s_response(buf, recv_len, &info))
-                {
-                    gs->m_nPing = (int)elapsed;
-                    gs->m_bHadSuccessfulResponse = true;
-                    gs->SetName(info.name);
-                    strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
-                    strncpy(gs->m_szGameDir, info.gamedir, sizeof(gs->m_szGameDir) - 1);
-                    strncpy(gs->m_szGameDescription, info.gamedesc, sizeof(gs->m_szGameDescription) - 1);
-                    gs->m_nAppID = info.appid;
-                    gs->m_nPlayers = info.players;
-                    gs->m_nMaxPlayers = info.max_players;
-                    gs->m_nBotPlayers = info.bots;
-                    gs->m_bPassword = info.password != 0;
-                    gs->m_bSecure = info.secure != 0;
-                    responded++;
-                }
-
-                closesocket(socks[i]);
-                socks[i] = INVALID_SOCKET;
-                activeCount--;
-                finished++;
-                sel--;
-
-                if (nextToSend < total)
-                {
-                    sendQuery(nextToSend);
-                    nextToSend++;
-                }
-            }
+            break;
         }
 
-        DWORD now = GetTickCount();
-        for (int i = 0; i < nextToSend; i++)
+        uint8_t recv_buf[4096];
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(from);
+        int recv_len = recvfrom(sock, (char *)recv_buf, sizeof(recv_buf), 0,
+            (struct sockaddr *)&from, &fromlen);
+
+        if (recv_len <= 0)
+            break;
+
+        uint32_t prev_last_ip = last_ip;
+        uint16_t prev_last_port = last_port_val;
+        int prev_count = result->count;
+
+        if (!parse_response(recv_buf, recv_len, result, &last_ip, &last_port_val))
+            break;
+
+        if (result->count == prev_count || (last_ip == 0 && last_port_val == 0))
         {
-            if (socks[i] == INVALID_SOCKET) continue;
-            if (now - sendTimes[i] > (DWORD)PER_SERVER_TIMEOUT)
-            {
-                closesocket(socks[i]);
-                socks[i] = INVALID_SOCKET;
-                activeCount--;
-                finished++;
-
-                if (nextToSend < total)
-                {
-                    sendQuery(nextToSend);
-                    nextToSend++;
-                }
-            }
+            done = true;
+            break;
         }
+
+        snprintf(last_addr, sizeof(last_addr), "%u.%u.%u.%u:%u",
+            (last_ip >> 24) & 0xFF, (last_ip >> 16) & 0xFF,
+            (last_ip >> 8) & 0xFF, last_ip & 0xFF, last_port_val);
+
+        retries++;
     }
 
-    for (int i = 0; i < nextToSend; i++)
+    CLOSE_SOCKET(sock);
+    return result->count > 0;
+}
+
+bool master_validate_server(const char *master_addr)
+{
+    char hostname[256];
+    strncpy(hostname, master_addr, sizeof(hostname) - 1);
+    hostname[sizeof(hostname) - 1] = '\0';
+
+    uint16_t port = PORT_MASTER;
+    char *colon = strrchr(hostname, ':');
+    if (colon)
     {
-        if (socks[i] != INVALID_SOCKET)
-            closesocket(socks[i]);
+        *colon = '\0';
+        int p = atoi(colon + 1);
+        if (p > 0 && p < 65536) port = (uint16_t)p;
     }
 
-    RealMasterLog("QueryThread finished: %d total, %d responded, %d processed", total, responded, finished);
-    data->self->m_queryDone = true;
-    delete data;
-    return 0;
-}
+    uint32_t ip = host2ip(hostname);
+    if (ip == 0 || ip == (uint32_t)-1) return false;
 
-HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
-    uint32_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32_t nFilters,
-    ISteamMatchmakingServerListResponse *pResponse)
-{
-    RealMasterLog("RequestInternetServerList(appID=%u, nFilters=%u, pResponse=%p)", iApp, nFilters, pResponse);
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = ip;
+    dest.sin_port = htons(port);
 
-    if (m_hThread)
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) return false;
+
+    uint8_t pkt[512];
+    int pkt_len = 0;
+    if (!build_query_packet(pkt, &pkt_len, sizeof(pkt), 0xFF, "0.0.0.0:0", "\\gamedir\\cstrike \\nap\\10 \\full\\1 \\empty\\1 \\secure\\1 \\proxy\\1"))
     {
-        if (IsThreadAlive(m_hThread))
-        {
-            RealMasterLog("  Cancelling previous query");
-            m_cancelRequested = true;
-            // EKLENDİ: Önceki Thread'in (sorgunun) sonlanmasını bekle, Race Condition ve bellek sızıntısını engelle.
-            WaitForSingleObject(m_hThread, INFINITE);
-        }
-        CloseHandle(m_hThread);
-        m_hThread = NULL;
+        CLOSE_SOCKET(sock);
+        return false;
     }
 
-    m_serverCount = 0;
-    m_refreshing = true;
-    m_queryDone = false;
-    m_cancelRequested = false;
-    m_lastDispatchedIdx = 0;
-    memset(m_dispatched, 0, sizeof(m_dispatched));
-    m_pResponse = pResponse;
-    m_requestCounter++;
+    sendto(sock, (const char *)pkt, pkt_len, 0, (struct sockaddr *)&dest, sizeof(dest));
 
-    QueryThreadData *data = new QueryThreadData;
-    data->self = this;
-    data->servers = m_servers;
-    data->serverCount = &m_serverCount;
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(sock, &readfds);
 
-    m_hThread = CreateThread(NULL, 0, QueryThread, data, 0, NULL);
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
 
-    return (HServerListRequest)(uintptr_t)m_requestCounter;
+    int sel = select((int)sock + 1, &readfds, NULL, NULL, &tv);
+    CLOSE_SOCKET(sock);
+    return sel > 0;
 }
 
-HServerListRequest CRealMasterMatchmaking::RequestLANServerList(uint32_t iApp, ISteamMatchmakingServerListResponse *pResponse)
+bool master_send_heartbeat(const char *master_addr, const heartbeat_info_t *info, unsigned int use_socket)
 {
-    if (m_pRealSteam) return m_pRealSteam->RequestLANServerList(iApp, pResponse);
-    return NULL;
-}
+    char hostname[256];
+    strncpy(hostname, master_addr, sizeof(hostname) - 1);
+    hostname[sizeof(hostname) - 1] = '\0';
 
-HServerListRequest CRealMasterMatchmaking::RequestFriendsServerList(uint32_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32_t nFilters, ISteamMatchmakingServerListResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->RequestFriendsServerList(iApp, ppchFilters, nFilters, pResponse);
-    return NULL;
-}
-
-HServerListRequest CRealMasterMatchmaking::RequestFavoritesServerList(uint32_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32_t nFilters, ISteamMatchmakingServerListResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->RequestFavoritesServerList(iApp, ppchFilters, nFilters, pResponse);
-    return NULL;
-}
-
-HServerListRequest CRealMasterMatchmaking::RequestHistoryServerList(uint32_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32_t nFilters, ISteamMatchmakingServerListResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->RequestHistoryServerList(iApp, ppchFilters, nFilters, pResponse);
-    return NULL;
-}
-
-HServerListRequest CRealMasterMatchmaking::RequestSpectatorServerList(uint32_t iApp, MatchMakingKeyValuePair_t **ppchFilters, uint32_t nFilters, ISteamMatchmakingServerListResponse *pResponse)
-{
-    RealMasterLog("RequestSpectatorServerList called (returning NULL)");
-    if (pResponse)
-        pResponse->RefreshComplete(NULL, eNoServersListedOnMasterServer);
-    return NULL;
-}
-
-static bool IsOurRequest(HServerListRequest hRequest, uint32_t counter)
-{
-    return hRequest == (HServerListRequest)(uintptr_t)counter && counter != 0;
-}
-
-void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
-{
-    if (IsOurRequest(hRequest, m_requestCounter))
+    uint16_t port = PORT_MASTER;
+    char *colon = strrchr(hostname, ':');
+    if (colon)
     {
-        RealMasterLog("ReleaseRequest called");
-        m_cancelRequested = true;
-        m_refreshing = false;
-        if (m_hThread)
-        {
-            // EKLENDİ: Listeden çıkarken/kapatırken de eskisinin tamamen ölmesini bekle
-            WaitForSingleObject(m_hThread, INFINITE);
-            CloseHandle(m_hThread);
-            m_hThread = NULL;
-        }
-        m_pResponse = NULL;
-        return;
+        *colon = '\0';
+        int p = atoi(colon + 1);
+        if (p > 0 && p < 65536) port = (uint16_t)p;
     }
-    if (m_pRealSteam) m_pRealSteam->ReleaseRequest(hRequest);
-}
 
-gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hRequest, int iServer)
-{
-    if (IsOurRequest(hRequest, m_requestCounter))
+    uint32_t master_ip = host2ip(hostname);
+    if (master_ip == 0 || master_ip == (uint32_t)-1) return false;
+
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = master_ip;
+    dest.sin_port = htons(port);
+
+    bool own_socket = (use_socket == 0 || use_socket == (unsigned int)INVALID_SOCKET);
+    SOCKET sock = own_socket ? socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) : (SOCKET)use_socket;
+    if (sock == INVALID_SOCKET) return false;
+
+    static const uint8_t challenge_req[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0x71 };
+    sendto(sock, (const char *)challenge_req, sizeof(challenge_req), 0,
+        (struct sockaddr *)&dest, sizeof(dest));
+
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(sock, &readfds);
+    struct timeval tv = { 2, 0 };
+
+    if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
     {
-        if (iServer < 0 || iServer >= m_serverCount) return NULL;
-        return &m_servers[iServer];
+        if (own_socket) CLOSE_SOCKET(sock);
+        return false;
     }
-    if (m_pRealSteam) return m_pRealSteam->GetServerDetails(hRequest, iServer);
-    return NULL;
-}
 
-void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
-{
-    if (IsOurRequest(hRequest, m_requestCounter))
+    uint8_t resp[64];
+    int resp_len = recvfrom(sock, (char *)resp, sizeof(resp), 0, NULL, NULL);
+    if (resp_len < 10 || resp[4] != 0x73)
     {
-        RealMasterLog("CancelQuery called");
-        m_cancelRequested = true;
-        if (m_pResponse)
-        {
-            m_pResponse->RefreshComplete(hRequest, eNoServersListedOnMasterServer);
-            RealMasterLog("Dispatched RefreshComplete after cancel");
-        }
-        m_refreshing = false;
-        return;
-    }
-    // DÜZELTİLDİ: m_pRealSteam->CancelServerQuery yerine CancelQuery olmalı.
-    if (m_pRealSteam) m_pRealSteam->CancelQuery(hRequest);
-}
-
-void CRealMasterMatchmaking::RefreshQuery(HServerListRequest hRequest)
-{
-    if (IsOurRequest(hRequest, m_requestCounter)) return;
-    if (m_pRealSteam) m_pRealSteam->RefreshQuery(hRequest);
-}
-
-void CRealMasterMatchmaking::DispatchCallbacks()
-{
-    if (!m_pResponse) return;
-    if (m_dispatching) return;
-    m_dispatching = true;
-
-    if (m_cancelRequested)
-    {
-        m_dispatching = false;
-        return;
+        if (own_socket) CLOSE_SOCKET(sock);
+        return false;
     }
 
-    HServerListRequest hReq = (HServerListRequest)(uintptr_t)m_requestCounter;
-    int current = m_serverCount;
+    uint32_t challenge;
+    memcpy(&challenge, resp + 6, 4);
 
-    int dispatched = 0;
-    int maxPerFrame = 20;
-    for (int i = 0; i < current && dispatched < maxPerFrame; i++)
-    {
-        if (m_dispatched[i]) continue;
-        if (m_servers[i].m_bHadSuccessfulResponse)
-        {
-            m_pResponse->ServerResponded(hReq, i);
-            m_dispatched[i] = true;
-            m_lastDispatchedIdx++;
-            dispatched++;
-        }
-        else if (m_queryDone)
-        {
-            m_pResponse->ServerFailedToRespond(hReq, i);
-            m_dispatched[i] = true;
-            m_lastDispatchedIdx++;
-        }
-    }
+    const char *gamedir = (info && info->gamedir[0]) ? info->gamedir : "cstrike";
+    const char *map = (info && info->map[0]) ? info->map : "unknown";
+    const char *version = (info && info->version[0]) ? info->version : "1.1.2.7/Stdio";
+    int protocol = (info && info->protocol > 0) ? info->protocol : 48;
+    char stype = (info && info->is_dedicated) ? 'd' : 'l';
 
-    if (m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
-    {
-        int responded = 0;
-        for (int i = 0; i < m_serverCount; i++)
-            if (m_servers[i].m_bHadSuccessfulResponse) responded++;
-        RealMasterLog("Dispatching RefreshComplete (%d total, %d responded)", m_serverCount, responded);
-        EMatchMakingServerResponse resp = (m_serverCount > 0) ?
-            eServerResponded : eNoServersListedOnMasterServer;
-        m_pResponse->RefreshComplete(hReq, resp);
-        m_refreshing = false;
-        m_queryDone = false;
-    }
+    char heartbeat[1024];
+    snprintf(heartbeat, sizeof(heartbeat),
+        "0\n\\protocol\\%d\\challenge\\%u\\players\\%d\\max\\%d\\bots\\%d"
+        "\\gamedir\\%s\\map\\%s\\type\\%c\\password\\%d\\os\\w"
+        "\\secure\\%d\\lan\\%d\\version\\%s\\region\\255\\product\\%s\n",
+        protocol, challenge,
+        info ? info->players : 0,
+        info ? info->max_players : 16,
+        info ? info->bots : 0,
+        gamedir, map, stype,
+        info ? info->password : 0,
+        info ? info->secure : 0,
+        info ? info->lan : 0,
+        version, gamedir);
 
-    m_dispatching = false;
-}
+    sendto(sock, heartbeat, (int)strlen(heartbeat), 0,
+        (struct sockaddr *)&dest, sizeof(dest));
 
-bool CRealMasterMatchmaking::IsRefreshing(HServerListRequest hRequest)
-{
-    if (IsOurRequest(hRequest, m_requestCounter))
-    {
-        DispatchCallbacks();
-        return m_refreshing || IsThreadAlive(m_hThread);
-    }
-    if (m_pRealSteam) return m_pRealSteam->IsRefreshing(hRequest);
-    return false;
-}
-
-int CRealMasterMatchmaking::GetServerCount(HServerListRequest hRequest)
-{
-    if (IsOurRequest(hRequest, m_requestCounter))
-    {
-        DispatchCallbacks();
-        return m_lastDispatchedIdx;
-    }
-    if (m_pRealSteam) return m_pRealSteam->GetServerCount(hRequest);
-    return 0;
-}
-
-void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iServer)
-{
-    if (!IsOurRequest(hRequest, m_requestCounter))
-    {
-        if (m_pRealSteam) m_pRealSteam->RefreshServer(hRequest, iServer);
-        return;
-    }
-    if (iServer < 0 || iServer >= m_serverCount) return;
-
-    gameserveritem_t *gs = &m_servers[iServer];
-    uint32_t ip_net = htonl(gs->m_NetAdr.GetIP());
-    uint16_t port_net = htons(gs->m_NetAdr.GetQueryPort());
-
-    a2s_server_info_t info;
-    if (a2s_query_server(ip_net, port_net, &info))
-    {
-        gs->m_nPing = info.ping_ms;
-        gs->m_bHadSuccessfulResponse = true;
-        gs->SetName(info.name);
-        strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
-        gs->m_nPlayers = info.players;
-        gs->m_nMaxPlayers = info.max_players;
-        gs->m_nBotPlayers = info.bots;
-        gs->m_bPassword = info.password != 0;
-        gs->m_bSecure = info.secure != 0;
-    }
-}
-
-HServerQuery CRealMasterMatchmaking::PingServer(uint32_t unIP, uint16_t usPort, ISteamMatchmakingPingResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->PingServer(unIP, usPort, pResponse);
-    return -1;
-}
-
-HServerQuery CRealMasterMatchmaking::PlayerDetails(uint32_t unIP, uint16_t usPort, ISteamMatchmakingPlayersResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->PlayerDetails(unIP, usPort, pResponse);
-    return -1;
-}
-
-HServerQuery CRealMasterMatchmaking::ServerRules(uint32_t unIP, uint16_t usPort, ISteamMatchmakingRulesResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->ServerRules(unIP, usPort, pResponse);
-    return -1;
-}
-
-void CRealMasterMatchmaking::CancelServerQuery(HServerQuery hServerQuery)
-{
-    if (m_pRealSteam) m_pRealSteam->CancelServerQuery(hServerQuery);
-}
-
-ISteamMatchmakingServers *GetRealMasterMatchmaking()
-{
-    return &g_RealMaster;
-}
-
-void SetRealSteamMatchmaking(ISteamMatchmakingServers *pReal)
-{
-    g_RealMaster.m_pRealSteam = pReal;
+    if (own_socket) CLOSE_SOCKET(sock);
+    return true;
 }
