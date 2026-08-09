@@ -8,7 +8,6 @@
 extern "C" {
 #endif
 
-// matchmaking_impl.cpp için dışa aktarılan istek paketleri ve boyutları[cite: 1]
 extern const uint8_t A2S_INFO_REQUEST[];
 extern const size_t A2S_INFO_REQUEST_LEN;
 
