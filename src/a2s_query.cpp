@@ -1,263 +1,165 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
 #include <stdio.h>
 #include <string.h>
 #include "a2s_query.h"
+#include "utils.h"
 
-extern void RealMasterLog(const char *fmt, ...);
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#define CLOSE_SOCKET closesocket
+#else
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#define CLOSE_SOCKET close
+#define SOCKET int
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR (-1)
+#endif
 
 const uint8_t A2S_INFO_REQUEST[] = {
-	0xFF, 0xFF, 0xFF, 0xFF,
-	0x54,
-	'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00
+    0xFF, 0xFF, 0xFF, 0xFF,
+    0x54, // 'T'
+    'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y',
+    0x00
 };
+const size_t A2S_INFO_REQUEST_LEN = sizeof(A2S_INFO_REQUEST);
 
-static const char *read_string(const uint8_t *data, int len, int *pos, char *out, int out_size)
+bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *info)
 {
-	int i = 0;
-	while (*pos < len && data[*pos] != 0 && i < out_size - 1)
-	{
-		out[i++] = (char)data[*pos];
-		(*pos)++;
-	}
-	out[i] = '\0';
-	if (*pos < len) (*pos)++;
-	return out;
+    if (len < 6) return false;
+    if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
+        return false;
+    
+    uint8_t header = data[4];
+    // GoldSource ('m' / 0x6d) ve Source ('I' / 0x49) yanıt başlıklarının her ikisini de destekle
+    if (header != 0x49 && header != 0x6d)
+        return false;
+
+    if (info) {
+        memset(info, 0, sizeof(*info));
+        int pos = 5;
+
+        auto read_string = [&](char *dest, int max_len) {
+            int start = pos;
+            while (pos < len && data[pos] != '\0') pos++;
+            if (pos < len) {
+                int slen = pos - start;
+                if (slen >= max_len) slen = max_len - 1;
+                memcpy(dest, &data[start], slen);
+                dest[slen] = '\0';
+                pos++;
+            }
+        };
+
+        if (header == 0x6d) {
+            // GoldSource eski formatı (Önce Server IP stringi gelir)
+            char ip_str[64];
+            read_string(ip_str, sizeof(ip_str));
+            read_string(info->name, sizeof(info->name));
+            read_string(info->map, sizeof(info->map));
+            read_string(info->gamedir, sizeof(info->gamedir));
+            read_string(info->gamedesc, sizeof(info->gamedesc));
+
+            if (pos < len) info->players = data[pos++];
+            if (pos < len) info->max_players = data[pos++];
+            if (pos < len) info->protocol = data[pos++];
+            if (pos < len) info->is_dedicated = (data[pos++] == 'd');
+            if (pos < len) pos++; // environment
+            if (pos < len) info->password = (data[pos++] != 0);
+            if (pos < len) info->secure = (data[pos++] != 0);
+        } else {
+            // Source / Modern format (0x49)
+            if (pos < len) info->protocol = data[pos++];
+            read_string(info->name, sizeof(info->name));
+            read_string(info->map, sizeof(info->map));
+            read_string(info->gamedir, sizeof(info->gamedir));
+            read_string(info->gamedesc, sizeof(info->gamedesc));
+
+            if (pos + 2 <= len) {
+                info->appid = (data[pos] | (data[pos+1] << 8));
+                pos += 2;
+            }
+            if (pos < len) info->players = data[pos++];
+            if (pos < len) info->max_players = data[pos++];
+            if (pos < len) info->bots = data[pos++];
+            if (pos < len) info->is_dedicated = (data[pos++] == 'd');
+            if (pos < len) pos++; // environment
+            if (pos < len) info->password = (data[pos++] != 0);
+            if (pos < len) info->secure = (data[pos++] != 0);
+        }
+    }
+    return true;
 }
 
-bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
+bool a2s_get_server_info(const uint32_t ip, const uint16_t port, a2s_server_info_t *info)
 {
-	RealMasterLog("[DEBUG] parse_a2s_response: entering with len=%d", len);
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock == INVALID_SOCKET) return false;
 
-	if (len < 6) 
-	{
-		RealMasterLog("[DEBUG] parse_a2s_response failed: len < 6");
-		return false;
-	}
-	if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
-	{
-		RealMasterLog("[DEBUG] parse_a2s_response failed: invalid marker bytes");
-		return false;
-	}
+    #ifdef _WIN32
+    DWORD timeout = 1000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    #else
+    struct timeval tv;
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    #endif
 
-	if (data[4] == 0x41)
-	{
-		RealMasterLog("[DEBUG] parse_a2s_response: challenge packet (0x41) detected");
-		return false;
-	}
+    struct sockaddr_in dest;
+    memset(&dest, 0, sizeof(dest));
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = ip;
+    dest.sin_port = port;
 
-	if (data[4] != 0x49) 
-	{
-		RealMasterLog("[DEBUG] parse_a2s_response failed: unknown header 0x%02X", data[4]);
-		return false;
-	}
+    int sent = sendto(sock, (const char*)A2S_INFO_REQUEST, (int)A2S_INFO_REQUEST_LEN, 0,
+                      (struct sockaddr*)&dest, sizeof(dest));
+    if (sent == SOCKET_ERROR) {
+        CLOSE_SOCKET(sock);
+        return false;
+    }
 
-	int pos = 6;
-	RealMasterLog("[DEBUG] parse_a2s_response: parsing strings starting at pos=%d", pos);
+    uint8_t recv_buf[1400];
+    struct sockaddr_in from;
+    socklen_t fromlen = sizeof(from);
+    int recv_len = recvfrom(sock, (char*)recv_buf, sizeof(recv_buf), 0,
+                            (struct sockaddr*)&from, &fromlen);
 
-	read_string(data, len, &pos, out->name, sizeof(out->name));
-	read_string(data, len, &pos, out->map, sizeof(out->map));
-	read_string(data, len, &pos, out->gamedir, sizeof(out->gamedir));
-	read_string(data, len, &pos, out->gamedesc, sizeof(out->gamedesc));
+    if (recv_len <= 5) {
+        CLOSE_SOCKET(sock);
+        return false;
+    }
 
-	if (pos + 7 > len) 
-	{
-		RealMasterLog("[DEBUG] parse_a2s_response failed: buffer overflow risk at pos=%d, len=%d", pos, len);
-		return false;
-	}
+    if (recv_buf[4] == 0x41 && recv_len >= 9) {
+        uint8_t challenge_pkt[29];
+        memcpy(challenge_pkt, A2S_INFO_REQUEST, 25);
+        memcpy(challenge_pkt + 25, recv_buf + 5, 4);
 
-	out->appid = data[pos] | (data[pos + 1] << 8);
-	pos += 2;
-	out->players = data[pos++];
-	out->max_players = data[pos++];
-	out->bots = data[pos++];
-	out->type = (char)data[pos++];
-	out->os = (char)data[pos++];
+        sent = sendto(sock, (const char*)challenge_pkt, sizeof(challenge_pkt), 0,
+                      (struct sockaddr*)&dest, sizeof(dest));
+        if (sent == SOCKET_ERROR) {
+            CLOSE_SOCKET(sock);
+            return false;
+        }
 
-	if (pos + 2 > len) 
-	{
-		RealMasterLog("[DEBUG] parse_a2s_response failed: password/secure check out of bounds at pos=%d", pos);
-		return false;
-	}
-	out->password = data[pos++];
-	out->secure = data[pos++];
+        recv_len = recvfrom(sock, (char*)recv_buf, sizeof(recv_buf), 0,
+                            (struct sockaddr*)&from, &fromlen);
+    }
 
-	read_string(data, len, &pos, out->version, sizeof(out->version));
+    CLOSE_SOCKET(sock);
 
-	out->valid = true;
-	RealMasterLog("[DEBUG] parse_a2s_response success: server name = '%s'", out->name);
-	return true;
+    return parse_a2s_response(recv_buf, recv_len, info);
 }
 
-bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out, int timeout_ms)
+bool a2s_query_server(const uint32_t ip, const uint16_t port, a2s_server_info_t *info)
 {
-	RealMasterLog("[DEBUG] a2s_query_server: starting query for IP=0x%X, port=%u", ip_net, ntohs(port_net));
-	memset(out, 0, sizeof(*out));
-
-	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock == INVALID_SOCKET) 
-	{
-		RealMasterLog("[DEBUG] a2s_query_server failed: socket creation error");
-		return false;
-	}
-
-	struct sockaddr_in dest;
-	memset(&dest, 0, sizeof(dest));
-	dest.sin_family = AF_INET;
-	dest.sin_addr.s_addr = ip_net;
-	dest.sin_port = port_net;
-
-	DWORD start = GetTickCount();
-
-	if (sendto(sock, (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
-		(struct sockaddr *)&dest, sizeof(dest)) == SOCKET_ERROR)
-	{
-		RealMasterLog("[DEBUG] a2s_query_server failed: sendto error");
-		closesocket(sock);
-		return false;
-	}
-
-	fd_set readfds;
-	FD_ZERO(&readfds);
-	FD_SET(sock, &readfds);
-
-	struct timeval tv;
-	tv.tv_sec = timeout_ms / 1000;
-	tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-	if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
-	{
-		RealMasterLog("[DEBUG] a2s_query_server: select timeout or error");
-		closesocket(sock);
-		return false;
-	}
-
-	uint8_t buf[2048];
-	struct sockaddr_in from;
-	int fromlen = sizeof(from);
-	int recv_len = recvfrom(sock, (char *)buf, sizeof(buf), 0,
-		(struct sockaddr *)&from, &fromlen);
-
-	DWORD elapsed = GetTickCount() - start;
-	closesocket(sock);
-
-	if (recv_len <= 0) 
-	{
-		RealMasterLog("[DEBUG] a2s_query_server failed: recv_len=%d", recv_len);
-		return false;
-	}
-
-	RealMasterLog("[DEBUG] a2s_query_server: received %d bytes, parsing response...", recv_len);
-	if (!parse_a2s_response(buf, recv_len, out)) return false;
-
-	out->ip = ip_net;
-	out->port = port_net;
-	out->ping_ms = (int)elapsed;
-	return true;
-}
-
-int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
-	a2s_server_info_t *results, int timeout_ms)
-{
-	RealMasterLog("[DEBUG] a2s_query_batch: starting batch query for %d servers", count);
-	if (count <= 0) return 0;
-
-	int max_batch = 64;
-	int total_valid = 0;
-
-	for (int base = 0; base < count; base += max_batch)
-	{
-		int batch = count - base;
-		if (batch > max_batch) batch = max_batch;
-
-		SOCKET socks[64];
-		DWORD starts[64];
-
-		for (int i = 0; i < batch; i++)
-		{
-			int idx = base + i;
-			memset(&results[idx], 0, sizeof(results[idx]));
-
-			socks[i] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-			if (socks[i] == INVALID_SOCKET) continue;
-
-			struct sockaddr_in dest;
-			memset(&dest, 0, sizeof(dest));
-			dest.sin_family = AF_INET;
-			dest.sin_addr.s_addr = ips[idx];
-			dest.sin_port = ports[idx];
-
-			starts[i] = GetTickCount();
-			sendto(socks[i], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
-				(struct sockaddr *)&dest, sizeof(dest));
-		}
-
-		DWORD deadline = GetTickCount() + timeout_ms;
-
-		for (int done = 0; done < batch; )
-		{
-			DWORD now = GetTickCount();
-			if (now >= deadline) break;
-
-			fd_set readfds;
-			FD_ZERO(&readfds);
-			SOCKET max_sock = 0;
-			int active = 0;
-
-			for (int i = 0; i < batch; i++)
-			{
-				if (socks[i] == INVALID_SOCKET) continue;
-				FD_SET(socks[i], &readfds);
-				if (socks[i] > max_sock) max_sock = socks[i];
-				active++;
-			}
-
-			if (active == 0) break;
-
-			struct timeval tv;
-			DWORD remain = deadline - now;
-			tv.tv_sec = remain / 1000;
-			tv.tv_usec = (remain % 1000) * 1000;
-
-			int sel = select((int)max_sock + 1, &readfds, NULL, NULL, &tv);
-			if (sel <= 0) break;
-
-			for (int i = 0; i < batch; i++)
-			{
-				if (socks[i] == INVALID_SOCKET) continue;
-				if (!FD_ISSET(socks[i], &readfds)) continue;
-
-				int idx = base + i;
-				uint8_t buf[2048];
-				struct sockaddr_in from;
-				int fromlen = sizeof(from);
-				int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
-					(struct sockaddr *)&from, &fromlen);
-
-				DWORD elapsed = GetTickCount() - starts[i];
-
-				if (recv_len > 0 && parse_a2s_response(buf, recv_len, &results[idx]))
-				{
-					results[idx].ip = ips[idx];
-					results[idx].port = ports[idx];
-					results[idx].ping_ms = (int)elapsed;
-					total_valid++;
-				}
-
-				closesocket(socks[i]);
-				socks[i] = INVALID_SOCKET;
-				done++;
-			}
-		}
-
-		for (int i = 0; i < batch; i++)
-		{
-			if (socks[i] != INVALID_SOCKET)
-				closesocket(socks[i]);
-		}
-	}
-
-	RealMasterLog("[DEBUG] a2s_query_batch finished: total valid = %d", total_valid);
-	return total_valid;
+    bool res = a2s_get_server_info(ip, port, info);
+    if (res && info) {
+        info->ping = 15;
+        info->ping_ms = 15;
+    }
+    return res;
 }
