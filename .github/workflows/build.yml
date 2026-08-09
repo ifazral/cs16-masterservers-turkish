@@ -49,6 +49,8 @@ jobs:
 
       - name: Get raw log URL
         id: logs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CHECK_ID=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/check-runs --jq '.check_runs[] | select(.name == "build") | .id' 2>/dev/null || echo "")
           if [ -n "$CHECK_ID" ]; then
@@ -56,8 +58,6 @@ jobs:
           else
             echo "url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
           fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create tag
         run: |
