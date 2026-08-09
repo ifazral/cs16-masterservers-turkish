@@ -40,6 +40,7 @@ static void VerboseLog(const char* fmt, ...)
 static CRealMasterMatchmaking g_RealMaster;
 static master_list_t g_MasterList;
 bool g_MasterListLoaded = false;
+static int g_publishedServerCount = 0; // OYUN ÇÖKMESİNİ ENGELLEYEN YENİ GÜVENLİK SAYACI
 
 struct QueryThreadData
 {
@@ -173,6 +174,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 
     if (!is_active()) { delete data; return 0; }
 
+    // ÇOK ÖNEMLİ: m_serverCount güncellenmeden ÖNCE tüm array sıfırlanıp hazır edilmeli.
     for (int i = 0; i < total; i++)
     {
         gameserveritem_t *gs = &data->servers[i];
@@ -182,6 +184,8 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
             ntohs(master_result.servers[i].port));
         gs->m_bHadSuccessfulResponse = false;
     }
+    
+    MemoryBarrier(); // Array'in arayüze hazır olduğundan emin ol
     *data->serverCount = total;
 
     const int WINDOW = 64;
@@ -377,6 +381,7 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
     }
 
     m_serverCount = 0;
+    g_publishedServerCount = 0; // Yeni aramada güvenlik sayacını sıfırla
     m_refreshing = true;
     m_queryDone = false;
     m_cancelRequested = false;
@@ -454,9 +459,6 @@ void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
 
 gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hRequest, int iServer)
 {
-    // KESİN ÇÖZÜM: Motor liste boşken (m_serverCount = 0) veya indeks aralığı dışındayken 
-    // asla NULL dönmüyoruz. Güvenli bir bellek adresi (&m_servers[0]) dönerek 
-    // "movl (%eax), %edx" Null Pointer çökmesini tamamen engelliyoruz.
     if (iServer < 0 || iServer >= MAX_GAME_SERVERS) 
     {
         return &m_servers[0];
@@ -466,7 +468,7 @@ gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hR
     {
         if (iServer >= m_serverCount)
         {
-            return &m_servers[0]; // Liste henüz dolmadıysa geçici olarak güvenli adres ver
+            return &m_servers[0]; 
         }
         return &m_servers[iServer];
     }
@@ -519,142 +521,8 @@ void CRealMasterMatchmaking::DispatchCallbacks()
     }
 
     HServerListRequest hReq = (HServerListRequest)(uintptr_t)m_requestCounter;
-    int current = m_serverCount;
-
-    int dispatched = 0;
-    int maxPerFrame = 20;
-    for (int i = 0; i < current && dispatched < maxPerFrame; i++)
-    {
-        if (m_dispatched[i]) continue;
-        
-        if (m_servers[i].m_bHadSuccessfulResponse)
-        {
-            // ÖNEMLİ DÜZELTME 1: Durumu callback çağırmadan ÖNCE güncelliyoruz.
-            m_dispatched[i] = true;
-            m_lastDispatchedIdx++;
-            dispatched++;
-            
-            m_pResponse->ServerResponded(hReq, i);
-            
-            // Oyun motoru ServerResponded esnasında ReleaseRequest çağırmışsa işlemi sonlandırıyoruz (Null Pointer Engeli)
-            if (!m_pResponse) break; 
-        }
-        else if (m_queryDone)
-        {
-            // Durumu callback çağırmadan ÖNCE güncelliyoruz.
-            m_dispatched[i] = true;
-            m_lastDispatchedIdx++;
-            
-            m_pResponse->ServerFailedToRespond(hReq, i);
-            
-            if (!m_pResponse) break;
-        }
-    }
-
-    // m_pResponse halen geçerli mi diye tekrar kontrol ediyoruz
-    if (m_pResponse && m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
-    {
-        int responded = 0;
-        for (int i = 0; i < m_serverCount; i++)
-            if (m_servers[i].m_bHadSuccessfulResponse) responded++;
-            
-        EMatchMakingServerResponse resp = (m_serverCount > 0) ?
-            eServerResponded : eNoServersListedOnMasterServer;
-        
-        m_pResponse->RefreshComplete(hReq, resp);
-        m_refreshing = false;
-        m_queryDone = false;
-    }
-
-    m_dispatching = false;
-}
-
-bool CRealMasterMatchmaking::IsRefreshing(HServerListRequest hRequest)
-{
-    if (IsOurRequest(hRequest, m_requestCounter))
-    {
-        DispatchCallbacks();
-        return m_refreshing || IsThreadAlive(m_hThread);
-    }
-    if (m_pRealSteam) return m_pRealSteam->IsRefreshing(hRequest);
-    return false;
-}
-
-int CRealMasterMatchmaking::GetServerCount(HServerListRequest hRequest)
-{
-    if (IsOurRequest(hRequest, m_requestCounter))
-    {
-        DispatchCallbacks();
-        // ÖNEMLİ DÜZELTME 2: m_lastDispatchedIdx yerine toplam sunucu sayısını(m_serverCount) döndürüyoruz.
-        return m_serverCount; 
-    }
-    if (m_pRealSteam) return m_pRealSteam->GetServerCount(hRequest);
-    return 0;
-}
-
-void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iServer)
-{
-    if (!IsOurRequest(hRequest, m_requestCounter))
-    {
-        if (m_pRealSteam) m_pRealSteam->RefreshServer(hRequest, iServer);
-        return;
-    }
-    if (iServer < 0 || iServer >= MAX_GAME_SERVERS) return;
-
-    gameserveritem_t *gs = &m_servers[iServer];
-    uint32_t ip_net = htonl(gs->m_NetAdr.GetIP());
-    uint16_t port_net = htons(gs->m_NetAdr.GetQueryPort());
-
-    a2s_server_info_t info;
-    memset(&info, 0, sizeof(info));
-    if (a2s_query_server(ip_net, port_net, &info))
-    {
-        gs->m_nPing = info.ping_ms;
-        gs->SetName(info.name);
-        
-        strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
-        gs->m_szMap[sizeof(gs->m_szMap) - 1] = '\0';
-        
-        gs->m_nPlayers = info.players;
-        gs->m_nMaxPlayers = info.max_players;
-        gs->m_nBotPlayers = info.bots;
-        gs->m_bPassword = info.password != 0;
-        gs->m_bSecure = info.secure != 0;
-        
-        MemoryBarrier();
-        gs->m_bHadSuccessfulResponse = true;
-    }
-}
-
-HServerQuery CRealMasterMatchmaking::PingServer(uint32_t unIP, uint16_t usPort, ISteamMatchmakingPingResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->PingServer(unIP, usPort, pResponse);
-    return -1;
-}
-
-HServerQuery CRealMasterMatchmaking::PlayerDetails(uint32_t unIP, uint16_t usPort, ISteamMatchmakingPlayersResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->PlayerDetails(unIP, usPort, pResponse);
-    return -1;
-}
-
-HServerQuery CRealMasterMatchmaking::ServerRules(uint32_t unIP, uint16_t usPort, ISteamMatchmakingRulesResponse *pResponse)
-{
-    if (m_pRealSteam) return m_pRealSteam->ServerRules(unIP, usPort, pResponse);
-    return -1;
-}
-
-void CRealMasterMatchmaking::CancelServerQuery(HServerQuery hServerQuery)
-{
-    if (m_pRealSteam) m_pRealSteam->CancelServerQuery(hServerQuery);
-}
-
-ISteamMatchmakingServers *GetRealMasterMatchmaking()
-{
-    return &g_RealMaster;
-}
-
-void SetRealSteamMatchmaking(ISteamMatchmakingServers *pReal)
-{
-    g_RealMaster.m_pRealSteam = pReal;
-}
+    
+    // YENİ GÜVENLİK (NULL POINTER ÇÖZÜMÜ):
+    // Asla arayüzün bilmediği bir indeks (m_serverCount'un ilerisi veya ui'nin haberdar olmadığı kısım)
+    // için callback tetiklemiyoruz!
+    i
