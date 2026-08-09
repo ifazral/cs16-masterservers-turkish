@@ -38,7 +38,7 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 	memset(out, 0, sizeof(*out));
 	int pos = 5;
 
-	// Orijinal yapıyı bozmadan hem 0x49 (Source) hem de 0x6d (GoldSource 'm') desteği
+	// Orijinal güvenli yapıyı bozmadan if-else ile 0x49 ve 0x6d desteği
 	if (data[4] == 0x49)
 	{
 		if (pos < len) pos++; // protocol byte
@@ -67,7 +67,7 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 
 		read_string(data, len, &pos, out->version, sizeof(out->version));
 	}
-	else if (data[4] == 0x6d) // Klasik GoldSource 'm' formatı
+	else if (data[4] == 0x6d) // Klasik GoldSource 'm' formatı güvenli parse
 	{
 		char ip_str[64];
 		read_string(data, len, &pos, ip_str, sizeof(ip_str));
@@ -78,9 +78,9 @@ bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 
 		if (pos < len) out->players = data[pos++];
 		if (pos < len) out->max_players = data[pos++];
-		if (pos < len) pos++; // protocol atla
+		if (pos < len) pos++; // protocol
 		if (pos < len) out->type = (char)data[pos++];
-		if (pos < len) pos++; // environment atla
+		if (pos < len) pos++; // environment
 		if (pos < len) out->password = data[pos++];
 		if (pos < len) out->secure = data[pos++];
 	}
