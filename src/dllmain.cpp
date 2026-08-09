@@ -696,6 +696,8 @@ static void InitEngineHook()
 							if (g_pServerNetadr)
 								RealMasterLog("Engine hook: server netadr at %p", g_pServerNetadr);
 						}
+						
+						/* [FIX for 12010 build crash] - Assembly komut uzunluklari degistigi icin iptal edildi.
 						int nopLen = 11;
 						if (ipPushRef[10] == 0x83 && ipPushRef[11] == 0xC4)
 							nopLen = 14;
@@ -703,12 +705,14 @@ static void InitEngineHook()
 						VirtualProtect(ipPushRef - 1, nopLen, PAGE_EXECUTE_READWRITE, &op);
 						memset(ipPushRef - 1, 0x90, nopLen);
 						VirtualProtect(ipPushRef - 1, nopLen, op, &op);
+						*/
+						
 						nopCount++;
 					}
 					searchFrom = ipPushRef + 5;
 				}
 				if (nopCount > 0)
-					RealMasterLog("Engine hook: NOPed %d Server IP address print(s)", nopCount);
+					RealMasterLog("Engine hook: Found %d Server IP address print(s) (Patch skipped for stability)", nopCount);
 			}
 
 			g_engineHooked = true;
