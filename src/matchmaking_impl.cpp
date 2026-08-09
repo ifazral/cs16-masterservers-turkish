@@ -11,12 +11,6 @@
 #include "server_cache.h"
 #include "utils.h"
 
-// DERLEME HATASI ÇÖZÜMÜ: sizeof() fonksiyonunun çalışabilmesi için baytları burada tanımladık
-static const uint8_t A2S_INFO_REQ_BYTES[] = { 
-    0xFF, 0xFF, 0xFF, 0xFF, 0x54, 0x53, 0x6F, 0x75, 0x72, 0x63, 0x65, 0x20, 
-    0x45, 0x6E, 0x67, 0x69, 0x6E, 0x65, 0x20, 0x51, 0x75, 0x65, 0x72, 0x79, 0x00 
-};
-
 extern void RealMasterLog(const char *fmt, ...);
 
 static CRealMasterMatchmaking g_RealMaster;
@@ -161,8 +155,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 			ntohs(master_result.servers[i].port));
 		gs->m_bHadSuccessfulResponse = false;
 	}
-    
-	MemoryBarrier();
 	*data->serverCount = total;
 
 	RealMasterLog("Pre-initialized %d server entries, starting A2S queries", total);
@@ -190,7 +182,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 		dest.sin_port = master_result.servers[idx].port;
 
 		sendTimes[idx] = GetTickCount();
-		sendto(socks[idx], (const char *)A2S_INFO_REQ_BYTES, sizeof(A2S_INFO_REQ_BYTES), 0,
+		sendto(socks[idx], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
 			(struct sockaddr *)&dest, sizeof(dest));
 		activeCount++;
 	};
@@ -244,6 +236,7 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 				if (recv_len > 0 && parse_a2s_response(buf, recv_len, &info))
 				{
 					gs->m_nPing = (int)elapsed;
+					gs->m_bHadSuccessfulResponse = true;
 					gs->SetName(info.name);
 					strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
 					strncpy(gs->m_szGameDir, info.gamedir, sizeof(gs->m_szGameDir) - 1);
@@ -254,9 +247,6 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 					gs->m_nBotPlayers = info.bots;
 					gs->m_bPassword = info.password != 0;
 					gs->m_bSecure = info.secure != 0;
-                    
-					MemoryBarrier(); // Kopyalamalar tam bitmeden okumayı engelle
-					gs->m_bHadSuccessfulResponse = true;
 					responded++;
 				}
 
@@ -451,11 +441,9 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 	for (int i = 0; i < current && dispatched < maxPerFrame; i++)
 	{
 		if (m_dispatched[i]) continue;
-		
 		if (m_servers[i].m_bHadSuccessfulResponse)
 		{
 			m_pResponse->ServerResponded(hReq, i);
-			if (!m_pResponse) break; // ÇÖZÜM: İptal olma ihtimaline karşı Re-entrancy kontrolü
 			m_dispatched[i] = true;
 			m_lastDispatchedIdx++;
 			dispatched++;
@@ -463,13 +451,12 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 		else if (m_queryDone)
 		{
 			m_pResponse->ServerFailedToRespond(hReq, i);
-			if (!m_pResponse) break;
 			m_dispatched[i] = true;
 			m_lastDispatchedIdx++;
 		}
 	}
 
-	if (m_pResponse && m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
+	if (m_queryDone && !m_cancelRequested && m_lastDispatchedIdx >= m_serverCount)
 	{
 		int responded = 0;
 		for (int i = 0; i < m_serverCount; i++)
@@ -477,8 +464,7 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 		RealMasterLog("Dispatching RefreshComplete (%d total, %d responded)", m_serverCount, responded);
 		EMatchMakingServerResponse resp = (m_serverCount > 0) ?
 			eServerResponded : eNoServersListedOnMasterServer;
-		
-		if (m_pResponse) m_pResponse->RefreshComplete(hReq, resp);
+		m_pResponse->RefreshComplete(hReq, resp);
 		m_refreshing = false;
 		m_queryDone = false;
 	}
@@ -525,6 +511,7 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
 	if (a2s_query_server(ip_net, port_net, &info))
 	{
 		gs->m_nPing = info.ping_ms;
+		gs->m_bHadSuccessfulResponse = true;
 		gs->SetName(info.name);
 		strncpy(gs->m_szMap, info.map, sizeof(gs->m_szMap) - 1);
 		gs->m_nPlayers = info.players;
@@ -532,9 +519,6 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
 		gs->m_nBotPlayers = info.bots;
 		gs->m_bPassword = info.password != 0;
 		gs->m_bSecure = info.secure != 0;
-        
-		MemoryBarrier();
-		gs->m_bHadSuccessfulResponse = true;
 	}
 }
 
