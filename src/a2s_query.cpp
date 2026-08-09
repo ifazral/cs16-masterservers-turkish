@@ -6,299 +6,247 @@
 #include "a2s_query.h"
 
 const uint8_t A2S_INFO_REQUEST[] = {
-    0xFF, 0xFF, 0xFF, 0xFF,
-    0x54,
-    'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00
+	0xFF, 0xFF, 0xFF, 0xFF,
+	0x54,
+	'S','o','u','r','c','e',' ','E','n','g','i','n','e',' ','Q','u','e','r','y', 0x00
 };
 
 static const char *read_string(const uint8_t *data, int len, int *pos, char *out, int out_size)
 {
-    int i = 0;
-    while (*pos < len && data[*pos] != 0 && i < out_size - 1)
-    {
-        out[i++] = (char)data[*pos];
-        (*pos)++;
-    }
-    out[i] = '\0';
-    if (*pos < len) (*pos)++;
-    return out;
+	int i = 0;
+	while (*pos < len && data[*pos] != 0 && i < out_size - 1)
+	{
+		out[i++] = (char)data[*pos];
+		(*pos)++;
+	}
+	out[i] = '\0';
+	if (*pos < len) (*pos)++;
+	return out;
 }
 
 bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out)
 {
-    if (len < 6) return false;
-    if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
-        return false;
+	if (len < 6) return false;
+	if (data[0] != 0xFF || data[1] != 0xFF || data[2] != 0xFF || data[3] != 0xFF)
+		return false;
 
-    if (data[4] == 0x41) return false;
+	if (data[4] == 0x41)
+	{
+		return false;
+	}
 
-    memset(out, 0, sizeof(*out));
-    int pos = 5;
+	memset(out, 0, sizeof(*out));
+	int pos = 5;
 
-    if (data[4] == 0x49) // Modern Source Formatı
-    {
-        if (pos < len) pos++; // protocol
+	// Orijinal yapıyı bozmadan hem 0x49 (Source) hem de 0x6d (GoldSource 'm') desteği
+	if (data[4] == 0x49)
+	{
+		if (pos < len) pos++; // protocol byte
 
-        read_string(data, len, &pos, out->name, sizeof(out->name));
-        read_string(data, len, &pos, out->map, sizeof(out->map));
-        read_string(data, len, &pos, out->gamedir, sizeof(out->gamedir));
-        read_string(data, len, &pos, out->gamedesc, sizeof(out->gamedesc));
+		read_string(data, len, &pos, out->name, sizeof(out->name));
+		read_string(data, len, &pos, out->map, sizeof(out->map));
+		read_string(data, len, &pos, out->gamedir, sizeof(out->gamedir));
+		read_string(data, len, &pos, out->gamedesc, sizeof(out->gamedesc));
 
-        if (pos + 2 <= len)
-        {
-            out->appid = data[pos] | (data[pos + 1] << 8);
-            pos += 2;
-        }
-        if (pos < len) out->players = data[pos++];
-        if (pos < len) out->max_players = data[pos++];
-        if (pos < len) out->bots = data[pos++];
-        if (pos < len) out->type = (char)data[pos++];
-        if (pos < len) out->os = (char)data[pos++];
+		if (pos + 2 <= len)
+		{
+			out->appid = data[pos] | (data[pos + 1] << 8);
+			pos += 2;
+		}
+		if (pos < len) out->players = data[pos++];
+		if (pos < len) out->max_players = data[pos++];
+		if (pos < len) out->bots = data[pos++];
+		if (pos < len) out->type = (char)data[pos++];
+		if (pos < len) out->os = (char)data[pos++];
 
-        if (pos + 2 <= len)
-        {
-            out->password = data[pos++];
-            out->secure = data[pos++];
-        }
+		if (pos + 2 <= len)
+		{
+			out->password = data[pos++];
+			out->secure = data[pos++];
+		}
 
-        read_string(data, len, &pos, out->version, sizeof(out->version));
-    }
-    else if (data[4] == 0x6d) // GoldSource Formatı ('m')
-    {
-        char ip_str[64];
-        read_string(data, len, &pos, ip_str, sizeof(ip_str));
-        read_string(data, len, &pos, out->name, sizeof(out->name));
-        read_string(data, len, &pos, out->map, sizeof(out->map));
-        read_string(data, len, &pos, out->gamedir, sizeof(out->gamedir));
-        read_string(data, len, &pos, out->gamedesc, sizeof(out->gamedesc));
+		read_string(data, len, &pos, out->version, sizeof(out->version));
+	}
+	else if (data[4] == 0x6d) // Klasik GoldSource 'm' formatı
+	{
+		char ip_str[64];
+		read_string(data, len, &pos, ip_str, sizeof(ip_str));
+		read_string(data, len, &pos, out->name, sizeof(out->name));
+		read_string(data, len, &pos, out->map, sizeof(out->map));
+		read_string(data, len, &pos, out->gamedir, sizeof(out->gamedir));
+		read_string(data, len, &pos, out->gamedesc, sizeof(out->gamedesc));
 
-        if (pos < len) out->players = data[pos++];
-        if (pos < len) out->max_players = data[pos++];
-        if (pos < len) pos++; // protocol
-        if (pos < len) out->type = (char)data[pos++];
-        if (pos < len) pos++; // environment
-        if (pos < len) out->password = data[pos++];
-        if (pos < len) out->secure = data[pos++];
-    }
-    else
-    {
-        return false;
-    }
+		if (pos < len) out->players = data[pos++];
+		if (pos < len) out->max_players = data[pos++];
+		if (pos < len) pos++; // protocol atla
+		if (pos < len) out->type = (char)data[pos++];
+		if (pos < len) pos++; // environment atla
+		if (pos < len) out->password = data[pos++];
+		if (pos < len) out->secure = data[pos++];
+	}
+	else
+	{
+		return false;
+	}
 
-    out->valid = true;
-    return true;
+	out->valid = true;
+	return true;
 }
 
 bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out, int timeout_ms)
 {
-    memset(out, 0, sizeof(*out));
+	memset(out, 0, sizeof(*out));
 
-    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == INVALID_SOCKET) return false;
+	SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock == INVALID_SOCKET) return false;
 
-    struct sockaddr_in dest;
-    memset(&dest, 0, sizeof(dest));
-    dest.sin_family = AF_INET;
-    dest.sin_addr.s_addr = ip_net;
-    dest.sin_port = port_net;
+	struct sockaddr_in dest;
+	memset(&dest, 0, sizeof(dest));
+	dest.sin_family = AF_INET;
+	dest.sin_addr.s_addr = ip_net;
+	dest.sin_port = port_net;
 
-    DWORD start = GetTickCount();
+	DWORD start = GetTickCount();
 
-    if (sendto(sock, (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
-        (struct sockaddr *)&dest, sizeof(dest)) == SOCKET_ERROR)
-    {
-        closesocket(sock);
-        return false;
-    }
+	if (sendto(sock, (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+		(struct sockaddr *)&dest, sizeof(dest)) == SOCKET_ERROR)
+	{
+		closesocket(sock);
+		return false;
+	}
 
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(sock, &readfds);
+	fd_set readfds;
+	FD_ZERO(&readfds);
+	FD_SET(sock, &readfds);
 
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
+	struct timeval tv;
+	tv.tv_sec = timeout_ms / 1000;
+	tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
-    {
-        closesocket(sock);
-        return false;
-    }
+	if (select((int)sock + 1, &readfds, NULL, NULL, &tv) <= 0)
+	{
+		closesocket(sock);
+		return false;
+	}
 
-    uint8_t buf[2048];
-    struct sockaddr_in from;
-    int fromlen = sizeof(from);
-    int recv_len = recvfrom(sock, (char *)buf, sizeof(buf), 0,
-        (struct sockaddr *)&from, &fromlen);
+	uint8_t buf[2048];
+	struct sockaddr_in from;
+	int fromlen = sizeof(from);
+	int recv_len = recvfrom(sock, (char *)buf, sizeof(buf), 0,
+		(struct sockaddr *)&from, &fromlen);
 
-    DWORD elapsed = GetTickCount() - start;
-    closesocket(sock);
+	DWORD elapsed = GetTickCount() - start;
+	closesocket(sock);
 
-    if (recv_len <= 0) return false;
+	if (recv_len <= 0) return false;
 
-    if (recv_len >= 9 && buf[0] == 0xFF && buf[1] == 0xFF && buf[2] == 0xFF && buf[3] == 0xFF && buf[4] == 0x41)
-    {
-        SOCKET sock2 = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock2 == INVALID_SOCKET) return false;
+	if (!parse_a2s_response(buf, recv_len, out)) return false;
 
-        uint8_t challenge_pkt[29];
-        memcpy(challenge_pkt, A2S_INFO_REQUEST, 25);
-        memcpy(challenge_pkt + 25, buf + 5, 4);
-
-        if (sendto(sock2, (const char *)challenge_pkt, sizeof(challenge_pkt), 0,
-            (struct sockaddr *)&dest, sizeof(dest)) == SOCKET_ERROR)
-        {
-            closesocket(sock2);
-            return false;
-        }
-
-        FD_ZERO(&readfds);
-        FD_SET(sock2, &readfds);
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-        if (select((int)sock2 + 1, &readfds, NULL, NULL, &tv) <= 0)
-        {
-            closesocket(sock2);
-            return false;
-        }
-
-        fromlen = sizeof(from);
-        recv_len = recvfrom(sock2, (char *)buf, sizeof(buf), 0,
-            (struct sockaddr *)&from, &fromlen);
-        closesocket(sock2);
-
-        if (recv_len <= 0) return false;
-    }
-
-    if (!parse_a2s_response(buf, recv_len, out)) return false;
-
-    out->ip = ip_net;
-    out->port = port_net;
-    out->ping_ms = (int)elapsed;
-    return true;
+	out->ip = ip_net;
+	out->port = port_net;
+	out->ping_ms = (int)elapsed;
+	return true;
 }
 
 int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
-    a2s_server_info_t *results, int timeout_ms)
+	a2s_server_info_t *results, int timeout_ms)
 {
-    if (count <= 0) return 0;
+	if (count <= 0) return 0;
 
-    int max_batch = 64;
-    int total_valid = 0;
+	int max_batch = 64;
+	int total_valid = 0;
 
-    for (int base = 0; base < count; base += max_batch)
-    {
-        int batch = count - base;
-        if (batch > max_batch) batch = max_batch;
+	for (int base = 0; base < count; base += max_batch)
+	{
+		int batch = count - base;
+		if (batch > max_batch) batch = max_batch;
 
-        SOCKET socks[64];
-        DWORD starts[64];
+		SOCKET socks[64];
+		DWORD starts[64];
 
-        for (int i = 0; i < batch; i++)
-        {
-            int idx = base + i;
-            memset(&results[idx], 0, sizeof(results[idx]));
+		for (int i = 0; i < batch; i++)
+		{
+			int idx = base + i;
+			memset(&results[idx], 0, sizeof(results[idx]));
 
-            socks[i] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-            if (socks[i] == INVALID_SOCKET) continue;
+			socks[i] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+			if (socks[i] == INVALID_SOCKET) continue;
 
-            struct sockaddr_in dest;
-            memset(&dest, 0, sizeof(dest));
-            dest.sin_family = AF_INET;
-            dest.sin_addr.s_addr = ips[idx];
-            dest.sin_port = ports[idx];
+			struct sockaddr_in dest;
+			memset(&dest, 0, sizeof(dest));
+			dest.sin_family = AF_INET;
+			dest.sin_addr.s_addr = ips[idx];
+			dest.sin_port = ports[idx];
 
-            starts[i] = GetTickCount();
-            sendto(socks[i], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
-                (struct sockaddr *)&dest, sizeof(dest));
-        }
+			starts[i] = GetTickCount();
+			sendto(socks[i], (const char *)A2S_INFO_REQUEST, sizeof(A2S_INFO_REQUEST), 0,
+				(struct sockaddr *)&dest, sizeof(dest));
+		}
 
-        DWORD deadline = GetTickCount() + timeout_ms;
+		DWORD deadline = GetTickCount() + timeout_ms;
 
-        for (int done = 0; done < batch; )
-        {
-            DWORD now = GetTickCount();
-            if (now >= deadline) break;
+		for (int done = 0; done < batch; )
+		{
+			DWORD now = GetTickCount();
+			if (now >= deadline) break;
 
-            fd_set readfds;
-            FD_ZERO(&readfds);
-            SOCKET max_sock = 0;
-            int active = 0;
+			fd_set readfds;
+			FD_ZERO(&readfds);
+			SOCKET max_sock = 0;
+			int active = 0;
 
-            for (int i = 0; i < batch; i++)
-            {
-                if (socks[i] == INVALID_SOCKET) continue;
-                FD_SET(socks[i], &readfds);
-                if (socks[i] > max_sock) max_sock = socks[i];
-                active++;
-            }
+			for (int i = 0; i < batch; i++)
+			{
+				if (socks[i] == INVALID_SOCKET) continue;
+				FD_SET(socks[i], &readfds);
+				if (socks[i] > max_sock) max_sock = socks[i];
+				active++;
+			}
 
-            if (active == 0) break;
+			if (active == 0) break;
 
-            struct timeval tv;
-            DWORD remain = deadline - now;
-            tv.tv_sec = remain / 1000;
-            tv.tv_usec = (remain % 1000) * 1000;
+			struct timeval tv;
+			DWORD remain = deadline - now;
+			tv.tv_sec = remain / 1000;
+			tv.tv_usec = (remain % 1000) * 1000;
 
-            int sel = select((int)max_sock + 1, &readfds, NULL, NULL, &tv);
-            if (sel <= 0) break;
+			int sel = select((int)max_sock + 1, &readfds, NULL, NULL, &tv);
+			if (sel <= 0) break;
 
-            for (int i = 0; i < batch; i++)
-            {
-                if (socks[i] == INVALID_SOCKET) continue;
-                if (!FD_ISSET(socks[i], &readfds)) continue;
+			for (int i = 0; i < batch; i++)
+			{
+				if (socks[i] == INVALID_SOCKET) continue;
+				if (!FD_ISSET(socks[i], &readfds)) continue;
 
-                int idx = base + i;
-                uint8_t buf[2048];
-                struct sockaddr_in from;
-                int fromlen = sizeof(from);
-                int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
-                    (struct sockaddr *)&from, &fromlen);
+				int idx = base + i;
+				uint8_t buf[2048];
+				struct sockaddr_in from;
+				int fromlen = sizeof(from);
+				int recv_len = recvfrom(socks[i], (char *)buf, sizeof(buf), 0,
+					(struct sockaddr *)&from, &fromlen);
 
-                DWORD elapsed = GetTickCount() - starts[i];
+				DWORD elapsed = GetTickCount() - starts[i];
 
-                if (recv_len > 0)
-                {
-                    if (recv_len >= 9 && buf[4] == 0x41)
-                    {
-                        struct sockaddr_in dest;
-                        memset(&dest, 0, sizeof(dest));
-                        dest.sin_family = AF_INET;
-                        dest.sin_addr.s_addr = ips[idx];
-                        dest.sin_port = ports[idx];
+				if (recv_len > 0 && parse_a2s_response(buf, recv_len, &results[idx]))
+				{
+					results[idx].ip = ips[idx];
+					results[idx].port = ports[idx];
+					results[idx].ping_ms = (int)elapsed;
+					total_valid++;
+				}
 
-                        uint8_t challenge_pkt[29];
-                        memcpy(challenge_pkt, A2S_INFO_REQUEST, 25);
-                        memcpy(challenge_pkt + 25, buf + 5, 4);
+				closesocket(socks[i]);
+				socks[i] = INVALID_SOCKET;
+				done++;
+			}
+		}
 
-                        sendto(socks[i], (const char *)challenge_pkt, sizeof(challenge_pkt), 0,
-                            (struct sockaddr *)&dest, sizeof(dest));
-                        starts[i] = GetTickCount();
-                        continue;
-                    }
+		for (int i = 0; i < batch; i++)
+		{
+			if (socks[i] != INVALID_SOCKET)
+				closesocket(socks[i]);
+		}
+	}
 
-                    if (parse_a2s_response(buf, recv_len, &results[idx]))
-                    {
-                        results[idx].ip = ips[idx];
-                        results[idx].port = ports[idx];
-                        results[idx].ping_ms = (int)elapsed;
-                        total_valid++;
-                    }
-                }
-
-                closesocket(socks[i]);
-                socks[i] = INVALID_SOCKET;
-                done++;
-            }
-        }
-
-        for (int i = 0; i < batch; i++)
-        {
-            if (socks[i] != INVALID_SOCKET)
-                closesocket(socks[i]);
-        }
-    }
-
-    return total_valid;
+	return total_valid;
 }
