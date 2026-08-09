@@ -338,6 +338,8 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
         {
             RealMasterLog("  Cancelling previous query");
             m_cancelRequested = true;
+            // EKLENDİ: Önceki Thread'in (sorgunun) sonlanmasını bekle, Race Condition ve bellek sızıntısını engelle.
+            WaitForSingleObject(m_hThread, INFINITE);
         }
         CloseHandle(m_hThread);
         m_hThread = NULL;
@@ -408,6 +410,8 @@ void CRealMasterMatchmaking::ReleaseRequest(HServerListRequest hRequest)
         m_refreshing = false;
         if (m_hThread)
         {
+            // EKLENDİ: Listeden çıkarken/kapatırken de eskisinin tamamen ölmesini bekle
+            WaitForSingleObject(m_hThread, INFINITE);
             CloseHandle(m_hThread);
             m_hThread = NULL;
         }
@@ -442,7 +446,8 @@ void CRealMasterMatchmaking::CancelQuery(HServerListRequest hRequest)
         m_refreshing = false;
         return;
     }
-    if (m_pRealSteam) m_pRealSteam->CancelServerQuery(hRequest);
+    // DÜZELTİLDİ: m_pRealSteam->CancelServerQuery yerine CancelQuery olmalı.
+    if (m_pRealSteam) m_pRealSteam->CancelQuery(hRequest);
 }
 
 void CRealMasterMatchmaking::RefreshQuery(HServerListRequest hRequest)
