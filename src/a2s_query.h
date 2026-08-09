@@ -1,35 +1,31 @@
-#pragma once
+#ifndef A2S_QUERY_H
+#define A2S_QUERY_H
+
 #include <stdint.h>
-#include <stddef.h>
 
-#pragma pack(push, 1)
-struct a2s_server_info_t
-{
-	char name[256];
-	char map[256];
-	char gamedir[256];
-	char gamedesc[256];
-	uint16_t appid;
-	uint8_t players;
-	uint8_t max_players;
-	uint8_t bots;
-	char type;
-	char os;
-	uint8_t password;
-	uint8_t secure;
-	char version[64];
-	uint32_t ip;
-	uint16_t port;
-	int ping_ms;
-	bool valid;
-};
-#pragma pack(pop)
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-extern const uint8_t A2S_INFO_REQUEST[];
-extern const size_t A2S_INFO_REQUEST_LEN;
+typedef struct {
+    char name[128];
+    char map[64];
+    char gamedir[32];
+    char gametype[32];
+    int players;
+    int max_players;
+    int bots;
+    int protocol;
+    bool is_dedicated;
+    bool password;
+    bool secure;
+    int ping;
+} a2s_server_info_t;
 
-bool parse_a2s_response(const uint8_t *data, int len, a2s_server_info_t *out);
-bool a2s_query_server(uint32_t ip_net, uint16_t port_net, a2s_server_info_t *out, int timeout_ms = 2000);
+bool a2s_get_server_info(const uint32_t ip, const uint16_t port, a2s_server_info_t *info);
 
-int a2s_query_batch(uint32_t *ips, uint16_t *ports, int count,
-	a2s_server_info_t *results, int timeout_ms = 3000);
+#ifdef __cplusplus
+}
+#endif
+
+#endif // A2S_QUERY_H
