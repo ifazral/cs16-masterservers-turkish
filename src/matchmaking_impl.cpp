@@ -11,7 +11,7 @@
 #include "server_cache.h"
 #include "utils.h"
 
-// DERLEME HATASINI ÇÖZEN KISIM: sizeof() çalışabilmesi için baytları burada boyutlu tanımladık
+// DERLEME HATASI ÇÖZÜMÜ: sizeof() fonksiyonunun çalışabilmesi için baytları burada tanımladık
 static const uint8_t A2S_INFO_REQ_BYTES[] = { 
     0xFF, 0xFF, 0xFF, 0xFF, 0x54, 0x53, 0x6F, 0x75, 0x72, 0x63, 0x65, 0x20, 
     0x45, 0x6E, 0x67, 0x69, 0x6E, 0x65, 0x20, 0x51, 0x75, 0x65, 0x72, 0x79, 0x00 
@@ -22,10 +22,6 @@ extern void RealMasterLog(const char *fmt, ...);
 static CRealMasterMatchmaking g_RealMaster;
 static master_list_t g_MasterList;
 bool g_MasterListLoaded = false;
-
-// KESİN ÇÖZÜM: Motorun çökmemsi için karmaşık sırayla gelen sunucuları
-// UI'nin beklediği 0, 1, 2, 3... sırasına oturtan haritalama dizisi.
-static int g_DispatchedIndices[MAX_GAME_SERVERS];
 
 struct QueryThreadData
 {
@@ -165,8 +161,8 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 			ntohs(master_result.servers[i].port));
 		gs->m_bHadSuccessfulResponse = false;
 	}
-	
-	MemoryBarrier(); // Dizi verilerinin UI tarafında sorunsuz okunabilmesi için bariyer
+    
+	MemoryBarrier();
 	*data->serverCount = total;
 
 	RealMasterLog("Pre-initialized %d server entries, starting A2S queries", total);
@@ -258,10 +254,9 @@ DWORD WINAPI CRealMasterMatchmaking::QueryThread(LPVOID param)
 					gs->m_nBotPlayers = info.bots;
 					gs->m_bPassword = info.password != 0;
 					gs->m_bSecure = info.secure != 0;
-					
-					MemoryBarrier(); // Verilerin güvenli aktarılması
+                    
+					MemoryBarrier(); // Kopyalamalar tam bitmeden okumayı engelle
 					gs->m_bHadSuccessfulResponse = true;
-					
 					responded++;
 				}
 
@@ -334,7 +329,6 @@ HServerListRequest CRealMasterMatchmaking::RequestInternetServerList(
 	m_cancelRequested = false;
 	m_lastDispatchedIdx = 0;
 	memset(m_dispatched, 0, sizeof(m_dispatched));
-	memset(g_DispatchedIndices, 0, sizeof(g_DispatchedIndices));
 	m_pResponse = pResponse;
 	m_requestCounter++;
 
@@ -407,9 +401,8 @@ gameserveritem_t *CRealMasterMatchmaking::GetServerDetails(HServerListRequest hR
 {
 	if (IsOurRequest(hRequest, m_requestCounter))
 	{
-		// Motordan gelen ardışık 'iServer' isteğini arka planda maplediğimiz karışık index'e çeviriyoruz
-		if (iServer < 0 || iServer >= m_lastDispatchedIdx) return NULL;
-		return &m_servers[g_DispatchedIndices[iServer]];
+		if (iServer < 0 || iServer >= m_serverCount) return NULL;
+		return &m_servers[iServer];
 	}
 	if (m_pRealSteam) return m_pRealSteam->GetServerDetails(hRequest, iServer);
 	return NULL;
@@ -455,33 +448,24 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 
 	int dispatched = 0;
 	int maxPerFrame = 20;
-	
 	for (int i = 0; i < current && dispatched < maxPerFrame; i++)
 	{
 		if (m_dispatched[i]) continue;
 		
 		if (m_servers[i].m_bHadSuccessfulResponse)
 		{
-			int uiIndex = m_lastDispatchedIdx;
-			g_DispatchedIndices[uiIndex] = i; 
-			
+			m_pResponse->ServerResponded(hReq, i);
+			if (!m_pResponse) break; // ÇÖZÜM: İptal olma ihtimaline karşı Re-entrancy kontrolü
 			m_dispatched[i] = true;
 			m_lastDispatchedIdx++;
 			dispatched++;
-			
-			m_pResponse->ServerResponded(hReq, uiIndex);
-			if (!m_pResponse) break; 
 		}
 		else if (m_queryDone)
 		{
-			int uiIndex = m_lastDispatchedIdx;
-			g_DispatchedIndices[uiIndex] = i; 
-			
+			m_pResponse->ServerFailedToRespond(hReq, i);
+			if (!m_pResponse) break;
 			m_dispatched[i] = true;
 			m_lastDispatchedIdx++;
-			
-			m_pResponse->ServerFailedToRespond(hReq, uiIndex);
-			if (!m_pResponse) break;
 		}
 	}
 
@@ -490,12 +474,11 @@ void CRealMasterMatchmaking::DispatchCallbacks()
 		int responded = 0;
 		for (int i = 0; i < m_serverCount; i++)
 			if (m_servers[i].m_bHadSuccessfulResponse) responded++;
-			
 		RealMasterLog("Dispatching RefreshComplete (%d total, %d responded)", m_serverCount, responded);
 		EMatchMakingServerResponse resp = (m_serverCount > 0) ?
 			eServerResponded : eNoServersListedOnMasterServer;
-			
-		m_pResponse->RefreshComplete(hReq, resp);
+		
+		if (m_pResponse) m_pResponse->RefreshComplete(hReq, resp);
 		m_refreshing = false;
 		m_queryDone = false;
 	}
@@ -532,10 +515,9 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
 		if (m_pRealSteam) m_pRealSteam->RefreshServer(hRequest, iServer);
 		return;
 	}
-	
-	if (iServer < 0 || iServer >= m_lastDispatchedIdx) return;
-	gameserveritem_t *gs = &m_servers[g_DispatchedIndices[iServer]];
+	if (iServer < 0 || iServer >= m_serverCount) return;
 
+	gameserveritem_t *gs = &m_servers[iServer];
 	uint32_t ip_net = htonl(gs->m_NetAdr.GetIP());
 	uint16_t port_net = htons(gs->m_NetAdr.GetQueryPort());
 
@@ -550,7 +532,7 @@ void CRealMasterMatchmaking::RefreshServer(HServerListRequest hRequest, int iSer
 		gs->m_nBotPlayers = info.bots;
 		gs->m_bPassword = info.password != 0;
 		gs->m_bSecure = info.secure != 0;
-		
+        
 		MemoryBarrier();
 		gs->m_bHadSuccessfulResponse = true;
 	}
